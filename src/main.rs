@@ -158,12 +158,33 @@ impl TextEditor {
     /// before means remove it before the cursor, same as backspace
     pub fn remove_character(&mut self, before: bool) {
         if before {
-            self.text.remove(self.text.byte_to_char(self.cursor.saturating_sub(1))..self.text.byte_to_char(self.cursor));
+            // end of the character to remove
+            let end = self.text.byte_to_char(self.cursor);
             
-            // TODO: causes panic!
+            // move back
             self.move_cursor_horizontal(-1, true);
+            
+            // we are now at the start
+            let start = self.text.byte_to_char(self.cursor);
+            
+            // remove it
+            self.text.remove(start..end);
         } else {
-            self.text.remove(self.text.byte_to_char(self.cursor)..self.text.byte_to_char(self.cursor + 1));
+            // start of the character to remove
+            let start_byte = self.cursor;
+            let start = self.text.byte_to_char(start_byte);
+            
+            // move forward
+            self.move_cursor_horizontal(1, true);
+            
+            // we are now at the end
+            let end = self.text.byte_to_char(self.cursor);
+            
+            // restore position
+            self.cursor = start_byte;
+            
+            // remove the next character
+            self.text.remove(start..end);    
         }
     }
 
@@ -328,6 +349,8 @@ fn terminal_main() {
                     // remove text
                     if code == KeyCode::Backspace {
                         editor.remove_character(true);
+                    } else if code == KeyCode::Delete {
+                        editor.remove_character(false);
                     }
 
                     // render
