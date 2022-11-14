@@ -12,7 +12,7 @@ use std::io::{stdout, Write};
 
 // editor deps
 use ropey::Rope;
-use unicode_segmentation::GraphemeCursor;
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 use unicode_width::UnicodeWidthChar;
 
 // editor ====================================================
@@ -71,57 +71,59 @@ impl TextEditor {
         // make a cursor
         let mut cursor = GraphemeCursor::new(self.cursor, self.text.len_bytes(), true);
 
+        // make the context
+        let (mut chunk, mut chunk_idx, _, _) = self.text.chunk_at_byte(self.cursor);
+
         // loop for as long as needed
         for _ in 0..amount.abs() {
-            // get the context for the current chunk
-            let (chunk, chunk_start, _, _) = self.text.chunk_at_byte(self.cursor);
+            // TODO: stop if we are at a newline if wrap is disabled
 
-            // give context based on if we are on the boundary
-            if chunk_start == self.cursor {
-                // context at the previous one
-                let (ctx_chunk, ctx_chunk_start, _, _) =
-                    self.text.chunk_at_byte(self.cursor.saturating_sub(1));
+            loop {
+                match if amount > 0 {
+                    cursor.next_boundary(chunk, chunk_idx)
+                } else {
+                    cursor.prev_boundary(chunk, chunk_idx)
+                } {
+                    // nothing, stop
+                    Ok(None) => {
+                        self.cursor = if amount > 0 { self.text.len_bytes() } else { 0 };
+                        return;
+                    }
 
-                // provide
-                cursor.provide_context(ctx_chunk, ctx_chunk_start);
-            } else if chunk_start + chunk.len() == self.cursor {
-                // context at the next one
-                let (ctx_chunk, ctx_chunk_start, _, _) = self
-                    .text
-                    .chunk_at_byte((self.cursor + 1).min(self.text.len_bytes()));
+                    // found a border, move the cursor there
+                    Ok(Some(n)) => {
+                        self.cursor = n;
+                        break;
+                    }
 
-                // provide
-                cursor.provide_context(ctx_chunk, ctx_chunk_start);
+                    // need more context
+                    Err(GraphemeIncomplete::NextChunk) => {
+                        // get the next chunk
+                        let (next_chunk, next_chunk_idx, _, _) =
+                            self.text.chunk_at_byte(self.cursor + chunk.len());
+                        chunk = next_chunk;
+                        chunk_idx = next_chunk_idx;
+                    }
+
+                    // need more context
+                    Err(GraphemeIncomplete::PrevChunk) => {
+                        // get the previous chunk
+                        let (prev_chunk, prev_chunk_idx, _, _) =
+                            self.text.chunk_at_byte(self.cursor.saturating_sub(1));
+                        chunk = prev_chunk;
+                        chunk_idx = prev_chunk_idx;
+                    }
+
+                    // provide context
+                    Err(GraphemeIncomplete::PreContext(n)) => {
+                        // get the context
+                        let ctx = self.text.chunk_at_byte(n.saturating_sub(1)).0;
+                        cursor.provide_context(ctx, n - ctx.len());
+                    }
+
+                    _ => unreachable!(),
+                }
             }
-
-            // go to the next boundary
-            let next_boundary = if amount > 0 {
-                cursor.next_boundary(chunk, chunk_start)
-            } else {
-                cursor.prev_boundary(chunk, chunk_start)
-            }
-            .unwrap()
-            .unwrap();
-
-            // if it contained a newline *and* wrap is false, stop here
-
-            // if it contained a newline, reset the column
-
-            // figure out how wide the boundary was
-
-            // use it to adjust the column
-
-            // now adjust the cursor
-
-            self.column = if amount > 0 {
-                self.column + 1
-            } else {
-                self.column.saturating_sub(1)
-            };
-            self.cursor = next_boundary;
-            //break;
-
-            // if the next boundary is on a newline, stop
         }
     }
 
@@ -140,17 +142,29 @@ impl TextEditor {
         self.row = next_line;
 
         // move horizontally until we are at the target
-        self.move_cursor_horizontal(self.target_column as isize, false);
+        //self.move_cursor_horizontal(self.target_column as isize, false);
     }
 
     /// insert a character
     pub fn insert_character(&mut self, character: char) {
-        todo!()
+        // insert
+        self.text.insert_char(self.text.byte_to_char(self.cursor), character);
+        
+        // move the cursor over
+        self.move_cursor_horizontal(1, false);
     }
 
-    /// remove a character
-    pub fn remove_character(&mut self, character: char) {
-        todo!()
+    /// remove a character at the cursor.
+    /// before means remove it before the cursor, same as backspace
+    pub fn remove_character(&mut self, before: bool) {
+        if before {
+            self.text.remove(self.text.byte_to_char(self.cursor.saturating_sub(1))..self.text.byte_to_char(self.cursor));
+            
+            // TODO: causes panic!
+            self.move_cursor_horizontal(-1, true);
+        } else {
+            self.text.remove(self.text.byte_to_char(self.cursor)..self.text.byte_to_char(self.cursor + 1));
+        }
     }
 
     /// get the currently visible buffer, as a list of lines
@@ -171,42 +185,38 @@ impl TextEditor {
 
                 // get the line in the buffer, right padded with spaces
                 // until it's too long to fit in the buffer
-                std::iter::repeat(' ')
-                    .take(gutter_chars_max - gutter.chars().count())
-                    .chain(gutter.chars())
-                    .chain(
-                        self.text
-                            .get_line(i)
-                            .map(|x| x.chars())
-                            .into_iter()
-                            .flatten()
-                            .chain(std::iter::repeat(' '))
-                            .scan(gutter_chars_max, |state, c| {
-                                if *state < width {
-                                    Some(
-                                        c.width_cjk()
-                                            .filter(|w| *state + w < width)
-                                            .map(|width| {
-                                                // TODO: fix this, idk how
-                                                // TODO: tabs
-                                                if width == 0 {
-                                                    *state += 1;
-                                                    ' '
-                                                } else {
-                                                    *state += width;
-                                                    c
-                                                }
-                                            })
-                                            .unwrap_or_else(|| {
-                                                *state += 1;
-                                                ' '
-                                            }),
-                                    )
-                                } else {
-                                    None
-                                }
-                            }),
-                    )
+
+                self.text
+                    .get_line(i)
+                    .map(|x| x.chars())
+                    .into_iter()
+                    .flatten()
+                    .chain(std::iter::repeat(' '))
+                    .scan(0, |state, c| {
+                        if *state < width {
+                            Some(
+                                c.width_cjk()
+                                    .filter(|w| *state + w < width)
+                                    .map(|width| {
+                                        // TODO: fix this, idk how
+                                        // TODO: tabs
+                                        if width == 0 {
+                                            *state += 1;
+                                            ' '
+                                        } else {
+                                            *state += width;
+                                            c
+                                        }
+                                    })
+                                    .unwrap_or_else(|| {
+                                        *state += 1;
+                                        ' '
+                                    }),
+                            )
+                        } else {
+                            None
+                        }
+                    })
             })
             .flatten()
             .collect();
@@ -311,8 +321,14 @@ fn terminal_main() {
                     }
 
                     // insert text
+                    if let KeyCode::Char(c) = code {
+                        editor.insert_character(c);
+                    }
 
                     // remove text
+                    if code == KeyCode::Backspace {
+                        editor.remove_character(true);
+                    }
 
                     // render
                     render(
@@ -354,6 +370,6 @@ fn terminal_main() {
 
 fn main() {
     // TODO: cmd args
-    
+
     terminal_main();
 }
