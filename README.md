@@ -7,7 +7,8 @@ Feel free to use this as reference for whatever you want
 
 Current goals:
  - render to the terminal - V
- - make grapheme cluster navigation work V -> no visual cursor momevemnt yet
+ - make grapheme cluster navigation work - V
+ - insert extra whitespace to match the previous line's whitespace that was before the cursor (and before the first text)
  - allow loading and saving files
  - make terminal cursor position and text layout work (including scrolling)
  - render to a gui (via minifb)

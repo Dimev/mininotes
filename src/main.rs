@@ -2,25 +2,94 @@
 use crossterm::{
     cursor,
     event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers},
-    execute, queue, style,
-    style::{Attribute, Color},
-    terminal,
-    tty::IsTty,
+    execute, queue, style, terminal,
 };
 
 use std::io::{stdout, Write};
 
 // editor deps
-use ropey::Rope;
+use ropey::{Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 use unicode_width::UnicodeWidthChar;
 
-// editor ====================================================
+// unicode tools =============================================
 
 // Ｈｅｌｌｏ, ｗｏｒｌｄ!
 // اربك تكست هو اول موقع يسمح لزواره الكرام بتحويل الكتابة العربي الى كتابة مفهومة من قبل اغلب برامج التصميم
 // 👩‍🔬👩🔬
 // 🇷🇸🇮🇴
+
+/// return the start byte index of the unicode grapheme if the cursor is advanced by amount
+/// returns the length of the rope if it's too far
+fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usize {
+    // make a cursor
+    let mut cursor = GraphemeCursor::new(byte_cursor, text.len_bytes(), true);
+
+    // make the context
+    let (mut chunk, mut chunk_idx, _, _) = text.chunk_at_byte(byte_cursor);
+
+    // loop for as long as needed
+    for _ in 0..amount.abs() {
+        // TODO: stop if we are at a newline if wrap is disabled
+
+        loop {
+            match if amount > 0 {
+                cursor.next_boundary(chunk, chunk_idx)
+            } else {
+                cursor.prev_boundary(chunk, chunk_idx)
+            } {
+                // nothing, stop
+                Ok(None) => {
+                    return if amount > 0 { text.len_bytes() } else { 0 };
+                }
+
+                // found a border, move the cursor there
+                Ok(Some(n)) => {
+                    byte_cursor = n;
+                    break;
+                }
+
+                // need more context
+                Err(GraphemeIncomplete::NextChunk) => {
+                    // get the next chunk
+                    let (next_chunk, next_chunk_idx, _, _) =
+                        text.chunk_at_byte(chunk_idx + chunk.len());
+                    chunk = next_chunk;
+                    chunk_idx = next_chunk_idx;
+                }
+
+                // need more context
+                Err(GraphemeIncomplete::PrevChunk) => {
+                    // get the previous chunk
+                    let (prev_chunk, prev_chunk_idx, _, _) = text.chunk_at_byte(chunk_idx - 1);
+                    chunk = prev_chunk;
+                    chunk_idx = prev_chunk_idx;
+                }
+
+                // provide context
+                Err(GraphemeIncomplete::PreContext(n)) => {
+                    // get the context
+                    let ctx = text.chunk_at_byte(n - 1).0;
+                    cursor.provide_context(ctx, n - ctx.len());
+                }
+
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    // and return the found byte position
+    byte_cursor
+}
+
+fn rope_width(rope: RopeSlice) -> usize {
+    rope.chars().map(|x| x.width_cjk().unwrap_or(0)).sum()
+}
+// TODO: grapheme width
+// TODO: full string kerning and the layout stuff to make it work on gui
+// TODO: helix style grapheme width to fix it breaking on missing font terminals
+
+// editor ====================================================
 
 /// multiline text editor
 pub struct TextEditor {
@@ -66,65 +135,12 @@ impl TextEditor {
 
     /// move cursor horizontally
     /// wrap means that it can move past a newline, and go on to the next line
-    // TODO! steal from helix
     pub fn move_cursor_horizontal(&mut self, amount: isize, wrap: bool) {
-        // make a cursor
-        let mut cursor = GraphemeCursor::new(self.cursor, self.text.len_bytes(), true);
+        // just move it
+        self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));
 
-        // make the context
-        let (mut chunk, mut chunk_idx, _, _) = self.text.chunk_at_byte(self.cursor);
-
-        // loop for as long as needed
-        for _ in 0..amount.abs() {
-            // TODO: stop if we are at a newline if wrap is disabled
-
-            loop {
-                match if amount > 0 {
-                    cursor.next_boundary(chunk, chunk_idx)
-                } else {
-                    cursor.prev_boundary(chunk, chunk_idx)
-                } {
-                    // nothing, stop
-                    Ok(None) => {
-                        self.cursor = if amount > 0 { self.text.len_bytes() } else { 0 };
-                        return;
-                    }
-
-                    // found a border, move the cursor there
-                    Ok(Some(n)) => {
-                        self.cursor = n;
-                        break;
-                    }
-
-                    // need more context
-                    Err(GraphemeIncomplete::NextChunk) => {
-                        // get the next chunk
-                        let (next_chunk, next_chunk_idx, _, _) =
-                            self.text.chunk_at_byte(self.cursor + chunk.len());
-                        chunk = next_chunk;
-                        chunk_idx = next_chunk_idx;
-                    }
-
-                    // need more context
-                    Err(GraphemeIncomplete::PrevChunk) => {
-                        // get the previous chunk
-                        let (prev_chunk, prev_chunk_idx, _, _) =
-                            self.text.chunk_at_byte(self.cursor.saturating_sub(1));
-                        chunk = prev_chunk;
-                        chunk_idx = prev_chunk_idx;
-                    }
-
-                    // provide context
-                    Err(GraphemeIncomplete::PreContext(n)) => {
-                        // get the context
-                        let ctx = self.text.chunk_at_byte(n.saturating_sub(1)).0;
-                        cursor.provide_context(ctx, n - ctx.len());
-                    }
-
-                    _ => unreachable!(),
-                }
-            }
-        }
+        // and recalculate the target column
+        self.target_column = self.get_cursor_column();
     }
 
     /// move cursor vertically
@@ -142,16 +158,25 @@ impl TextEditor {
         self.row = next_line;
 
         // move horizontally until we are at the target
-        //self.move_cursor_horizontal(self.target_column as isize, false);
+        self.move_cursor_to_column(self.target_column);
     }
 
     /// insert a character
     pub fn insert_character(&mut self, character: char) {
         // insert
-        self.text.insert_char(self.text.byte_to_char(self.cursor), character);
-        
+        self.text
+            .insert_char(self.text.byte_to_char(self.cursor), character);
+
         // move the cursor over
         self.move_cursor_horizontal(1, false);
+    }
+
+    /// insert a newline
+    pub fn insert_newline(&mut self) {
+        // TODO: align with the right amount of whitespaces as well
+
+        // insert a newline
+        self.insert_character('\n');
     }
 
     /// remove a character at the cursor.
@@ -160,40 +185,37 @@ impl TextEditor {
         if before {
             // end of the character to remove
             let end = self.text.byte_to_char(self.cursor);
-            
+
             // move back
             self.move_cursor_horizontal(-1, true);
-            
+
             // we are now at the start
             let start = self.text.byte_to_char(self.cursor);
-            
+
             // remove it
             self.text.remove(start..end);
         } else {
             // start of the character to remove
             let start_byte = self.cursor;
             let start = self.text.byte_to_char(start_byte);
-            
+
             // move forward
             self.move_cursor_horizontal(1, true);
-            
+
             // we are now at the end
             let end = self.text.byte_to_char(self.cursor);
-            
+
             // restore position
             self.cursor = start_byte;
-            
+
             // remove the next character
-            self.text.remove(start..end);    
+            self.text.remove(start..end);
         }
     }
 
     /// get the currently visible buffer, as a list of lines
     // TODO: ITERATOR!
     pub fn get_buffer(&self, width: usize, height: usize) -> String {
-        // figure out the amount of characters in the gutter
-        let gutter_chars_max = ((height as f32).log10().floor() + 1.0) as usize;
-
         // all found text lines
         //let mut lines = String::new();
 
@@ -201,9 +223,6 @@ impl TextEditor {
         let lines = (0..height)
             .into_iter()
             .map(|i| {
-                // how wide this gutter is
-                let gutter = ""; //format!("{}", i);
-
                 // get the line in the buffer, right padded with spaces
                 // until it's too long to fit in the buffer
 
@@ -246,8 +265,117 @@ impl TextEditor {
         lines
     }
 
+    /// move the cursor to a specific column, assuming a terminal program
+    pub fn move_cursor_to_column(&mut self, column: usize) {
+        // move the cursor to the start of the line
+        self.move_cursor_to_start_of_line();
+
+        // find the line
+        let line_end = self
+            .text
+            .line(self.text.byte_to_line(self.cursor))
+            .len_bytes()
+            + self.cursor;
+
+        // where we are now
+        let mut current_column = 0;
+
+        // go one to the right untill we are at the right position
+        while current_column < column {
+            // start byte pos
+            let start_byte_pos = self.cursor;
+
+            // and end byte pos to figure out the end of the grapheme
+            let end_byte_pos = move_grapheme(1, self.cursor, self.text.slice(..));
+
+            // stop if it's on the next line
+            if end_byte_pos >= line_end {
+                break;
+            }
+
+            // figure out it's length
+            let grapheme_len = rope_width(self.text.slice(start_byte_pos..end_byte_pos));
+
+            // add it to the column
+            current_column += grapheme_len;
+
+            // and move the cursor
+            self.cursor = end_byte_pos;
+        }
+    }
+
+    /// move the cursor to the start of the line
+    pub fn move_cursor_to_start_of_line(&mut self) {
+        self.cursor = self.text.line_to_byte(self.text.byte_to_line(self.cursor));
+    }
+
+    /// move the cursor to the end of the line
+    pub fn move_cursor_to_end_of_line(&mut self) {
+        // do nothing if we are at the end of the file
+        if self.cursor != self.text.len_bytes() {
+            // move it to the start of the next line
+            let line = self.text.byte_to_line(self.cursor);
+
+            // find where the next line starts
+            let next_line_start = self
+                .text
+                .line_to_byte((line + 1).min(self.text.len_lines()));
+
+            // move it to the next one
+            self.cursor = next_line_start;
+
+            // move it back, if we're not at the end of the file
+            if self.cursor != self.text.len_bytes() {
+                self.move_cursor_horizontal(-1, false);
+            }
+        }
+    }
+
+    /// get the current position of the column the cursor is on, assuming a terminal program
+    pub fn get_cursor_column(&self) -> usize {
+        // get the line and line number
+        let line = self.text.byte_to_line(self.cursor);
+
+        // where it starts
+        let line_byte_idx = self.text.line_to_byte(line);
+
+        // current byte position
+        let mut byte_pos = line_byte_idx;
+
+        // current horizontal position
+        let mut column = 0;
+
+        // now figure out where we are on the line
+        while byte_pos < self.cursor {
+            // start byte pos
+            let start_byte_pos = byte_pos;
+
+            // and end byte pos to figure out the end of the grapheme
+            let end_byte_pos = move_grapheme(1, byte_pos, self.text.slice(..));
+
+            // figure out it's length
+            // TODO: something goes wrong here
+            let grapheme_len = rope_width(self.text.slice(start_byte_pos..end_byte_pos));
+
+            // add it to the column
+            column += grapheme_len;
+
+            // move the byte pos
+            byte_pos = end_byte_pos;
+        }
+
+        column
+    }
+
+    /// get the cursor pos, assuming a terminal program
     pub fn get_cursor_pos(&self) -> (u16, u16) {
-        (self.column as u16, self.row as u16)
+        // get the line and line number
+        let line = self.text.byte_to_line(self.cursor);
+
+        // and the column
+        let column = self.get_cursor_column();
+
+        (column as u16, line as u16)
     }
 }
 
@@ -339,15 +467,19 @@ fn terminal_main() {
                         editor.move_cursor_horizontal(-1, true);
                     } else if code == KeyCode::Right {
                         editor.move_cursor_horizontal(1, true);
+                    } else if code == KeyCode::Home {
+                        editor.move_cursor_to_start_of_line();
+                    } else if code == KeyCode::End {
+                        editor.move_cursor_to_end_of_line();
                     }
-
                     // insert text
-                    if let KeyCode::Char(c) = code {
+                    else if let KeyCode::Char(c) = code {
                         editor.insert_character(c);
+                    } else if code == KeyCode::Enter {
+                        editor.insert_newline();
                     }
-
                     // remove text
-                    if code == KeyCode::Backspace {
+                    else if code == KeyCode::Backspace {
                         editor.remove_character(true);
                     } else if code == KeyCode::Delete {
                         editor.remove_character(false);
