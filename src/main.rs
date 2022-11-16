@@ -213,58 +213,6 @@ impl TextEditor {
         }
     }
 
-    /// get the currently visible buffer, as a list of lines
-    // TODO: ITERATOR!
-    pub fn get_buffer(&self, width: usize, height: usize) -> String {
-        // all found text lines
-        //let mut lines = String::new();
-
-        // go over the lines in the buffer
-        let lines = (0..height)
-            .into_iter()
-            .map(|i| {
-                // get the line in the buffer, right padded with spaces
-                // until it's too long to fit in the buffer
-
-                self.text
-                    .get_line(i)
-                    .map(|x| x.chars())
-                    .into_iter()
-                    .flatten()
-                    .chain(std::iter::repeat(' '))
-                    .scan(0, |state, c| {
-                        if *state < width {
-                            Some(
-                                c.width_cjk()
-                                    .filter(|w| *state + w < width)
-                                    .map(|width| {
-                                        // TODO: fix this, idk how
-                                        // TODO: tabs
-                                        if width == 0 {
-                                            *state += 1;
-                                            ' '
-                                        } else {
-                                            *state += width;
-                                            c
-                                        }
-                                    })
-                                    .unwrap_or_else(|| {
-                                        *state += 1;
-                                        ' '
-                                    }),
-                            )
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .flatten()
-            .collect();
-
-        // return the buffer
-        lines
-    }
-
     /// move the cursor to a specific column, assuming a terminal program
     pub fn move_cursor_to_column(&mut self, column: usize) {
         // move the cursor to the start of the line
@@ -294,7 +242,9 @@ impl TextEditor {
             }
 
             // figure out it's length
-            let grapheme_len = rope_width(self.text.slice(start_byte_pos..end_byte_pos));
+            let grapheme_len = rope_width(self.text.slice(
+                self.text.byte_to_char(start_byte_pos)..self.text.byte_to_char(end_byte_pos),
+            ));
 
             // add it to the column
             current_column += grapheme_len;
@@ -354,8 +304,9 @@ impl TextEditor {
             let end_byte_pos = move_grapheme(1, byte_pos, self.text.slice(..));
 
             // figure out it's length
-            // TODO: something goes wrong here
-            let grapheme_len = rope_width(self.text.slice(start_byte_pos..end_byte_pos));
+            let grapheme_len = rope_width(self.text.slice(
+                self.text.byte_to_char(start_byte_pos)..self.text.byte_to_char(end_byte_pos),
+            ));
 
             // add it to the column
             column += grapheme_len;
@@ -368,26 +319,91 @@ impl TextEditor {
     }
 
     /// get the cursor pos, assuming a terminal program
-    pub fn get_cursor_pos(&self) -> (u16, u16) {
+    /// this is the true cursor position, not adjusted by scrolling
+    pub fn get_cursor_pos(&self) -> (usize, usize) {
         // get the line and line number
         let line = self.text.byte_to_line(self.cursor);
 
         // and the column
         let column = self.get_cursor_column();
 
-        (column as u16, line as u16)
+        (column, line)
+    }
+    
+    /// gets the cursor position adjusted by scrolling
+    pub fn get_relative_cursor_pos(&self) -> Option<(usize, usize)> {
+        let (x, y) = self.get_cursor_pos();
+        
+        // only return if it's in frame
+        Some((x.checked_sub(self.scroll_columns)?, y.checked_sub(self.scroll_lines)?))
+    }
+    
+    /// set the right scrolling values so the text stays in frame
+    /// margins are how many characters before and after on that axis should remain visible
+    pub fn set_scroll(&mut self, width: usize, height: usize, width_margin: usize, height_margin: usize) {
+        // get the cursor position
+        let (x, y) = self.get_cursor_pos();
+        
+        self.scroll_lines = self.scroll_lines.max(y.saturating_sub(height.saturating_sub(height_margin))).min(y.saturating_sub(height_margin));
+    }
+
+    /// get the currently visible buffer, as a list of lines
+    // TODO: ITERATOR!
+    pub fn get_buffer(&self, width: usize, height: usize) -> String {
+        // all found text lines
+        //let mut lines = String::new();
+
+        // go over the lines in the buffer
+        let lines = (self.scroll_lines..self.scroll_lines + height)
+            .into_iter()
+            .map(|i| {
+                // get the line in the buffer, right padded with spaces
+                // until it's too long to fit in the buffer
+
+                self.text
+                    .get_line(i)
+                    .map(|x| x.chars())
+                    .into_iter()
+                    .flatten()
+                    .chain(std::iter::repeat(' '))
+                    .scan(0, |state, c| {
+                        if *state < width {
+                            Some(
+                                c.width_cjk()
+                                    .filter(|w| *state + w < width)
+                                    .map(|width| {
+                                        // TODO: fix this, idk how
+                                        // TODO: tabs
+                                        *state += width;
+                                        c
+                                    })
+                                    .unwrap_or_else(|| {
+                                        *state += 1;
+                                        ' '
+                                    }),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .flatten()
+            .collect();
+
+        // return the buffer
+        lines
     }
 }
 
 // terminal ==============================================
 
-fn render(buffer: &str, cursor: Option<(u16, u16)>) {
+fn render(buffer: &str, cursor: Option<(usize, usize)>) {
     // print editor
     queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
 
     // set cursor
     if let Some((x, y)) = cursor {
-        queue!(stdout(), cursor::Show, cursor::MoveTo(x, y)).unwrap();
+        queue!(stdout(), cursor::Show, cursor::MoveTo(x as u16, y as u16)).unwrap();
     } else {
         queue!(stdout(), cursor::Hide).unwrap();
     };
@@ -484,11 +500,14 @@ fn terminal_main() {
                     } else if code == KeyCode::Delete {
                         editor.remove_character(false);
                     }
+                    
+                    // fix scrolling before rendering
+                    editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
                     render(
                         &editor.get_buffer(width as usize, height as usize),
-                        Some(editor.get_cursor_pos()),
+                        editor.get_relative_cursor_pos(),
                     );
                 }
 
