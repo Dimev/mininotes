@@ -10,7 +10,7 @@ Current goals:
  - make grapheme cluster navigation work - V
  - insert extra whitespace to match the previous line's whitespace that was before the cursor (and before the first text)
  - allow loading and saving files
- - make terminal cursor position and text layout work (including scrolling)
+ - make terminal cursor position and text layout work (including scrolling) ~ Vertical only so far
  - render to a gui (via minifb)
  - make gui terminal cursor position and text layout work
  - basic undo/redo/copy/paste, status bar
