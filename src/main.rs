@@ -329,22 +329,34 @@ impl TextEditor {
 
         (column, line)
     }
-    
+
     /// gets the cursor position adjusted by scrolling
     pub fn get_relative_cursor_pos(&self) -> Option<(usize, usize)> {
         let (x, y) = self.get_cursor_pos();
-        
+
         // only return if it's in frame
-        Some((x.checked_sub(self.scroll_columns)?, y.checked_sub(self.scroll_lines)?))
+        Some((
+            x.checked_sub(self.scroll_columns)?,
+            y.checked_sub(self.scroll_lines)?,
+        ))
     }
-    
+
     /// set the right scrolling values so the text stays in frame
     /// margins are how many characters before and after on that axis should remain visible
-    pub fn set_scroll(&mut self, width: usize, height: usize, width_margin: usize, height_margin: usize) {
+    pub fn set_scroll(
+        &mut self,
+        width: usize,
+        height: usize,
+        width_margin: usize,
+        height_margin: usize,
+    ) {
         // get the cursor position
         let (x, y) = self.get_cursor_pos();
-        
-        self.scroll_lines = self.scroll_lines.max(y.saturating_sub(height.saturating_sub(height_margin))).min(y.saturating_sub(height_margin));
+
+        self.scroll_lines = self
+            .scroll_lines
+            .max(y.saturating_sub(height.saturating_sub(height_margin + 1)))
+            .min(y.saturating_sub(height_margin));
     }
 
     /// get the currently visible buffer, as a list of lines
@@ -500,7 +512,7 @@ fn terminal_main() {
                     } else if code == KeyCode::Delete {
                         editor.remove_character(false);
                     }
-                    
+
                     // fix scrolling before rendering
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
