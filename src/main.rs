@@ -9,7 +9,7 @@ use std::io::{stdout, Write};
 
 // editor deps
 use ropey::{Rope, RopeSlice};
-use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 use unicode_width::UnicodeWidthChar;
 
 // unicode tools =============================================
@@ -136,15 +136,10 @@ impl TextEditor {
     /// move cursor horizontally
     pub fn move_cursor_horizontal(&mut self, amount: isize) {
         // just move it
-        self.move_cursor_horizontal_without_target(amount);
+        self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));
 
         // and recalculate the target column
         self.target_column = self.get_cursor_column();
-    }
-    
-    /// move the cursor horizontally without setting the target column
-    pub fn move_cursor_horizontal_without_target(&mut self, amount: isize) {
-        self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));  
     }
 
     /// move cursor vertically
@@ -175,12 +170,45 @@ impl TextEditor {
         self.move_cursor_horizontal(1);
     }
 
+    /// insert a string
+    pub fn insert_string(&mut self, string: &str) {
+        // insert
+        self.text
+            .insert(self.text.byte_to_char(self.cursor), string);
+
+        // move the cursor over
+        self.move_cursor_horizontal(string.graphemes(true).count() as isize);
+    }
+
     /// insert a newline
+    /// also inserts all spaces preceeding the current line, up to the cursor position
     pub fn insert_newline(&mut self) {
-        // TODO: align with the right amount of whitespaces as well
+        // get the line we are currently on
+        let line_num = self.text.byte_to_line(self.cursor);
+
+        // get the current line
+        let line = self.text.line(line_num);
+
+        // where the cursor is in chars
+        let line_char_start = self.text.line_to_char(line_num);
+
+        // where the cursor is right now
+        let line_char_pos = self.text.byte_to_char(self.cursor);
+
+        // figure out the whitespaces preceeding that line, up to
+        let pred_whitespace = line
+            .chars()
+            .take_while(
+                |x| x.is_whitespace() && *x != '\n', /* TODO: proper whitespace */
+            )
+            .take(line_char_pos - line_char_start)
+            .collect::<String>();
 
         // insert a newline
         self.insert_character('\n');
+
+        // append the extra whitespaces
+        self.insert_string(&pred_whitespace);
     }
 
     /// remove a character at the cursor.
@@ -361,11 +389,11 @@ impl TextEditor {
             .scroll_lines
             .max(y.saturating_sub(height.saturating_sub(height_margin + 1)))
             .min(y.saturating_sub(height_margin));
-        
+
         self.scroll_columns = self
             .scroll_columns
             .max(x.saturating_sub(width.saturating_sub(width_margin + 1)))
-            .min(y.saturating_sub(width_margin)); 
+            .min(y.saturating_sub(width_margin));
     }
 
     /// get the currently visible buffer, as a list of lines
@@ -422,6 +450,8 @@ fn render(buffer: &str, cursor: Option<(usize, usize)>) {
     // print editor
     queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
 
+    // TODO: diff
+
     // set cursor
     if let Some((x, y)) = cursor {
         queue!(stdout(), cursor::Show, cursor::MoveTo(x as u16, y as u16)).unwrap();
@@ -434,19 +464,18 @@ fn render(buffer: &str, cursor: Option<(usize, usize)>) {
 }
 
 fn terminal_main() {
-    
     // get the file
     let Some(file_path) = std::env::args_os().skip(1).next() else {
         println!("Usage: mininotes <file>");
-        return;  
+        return;
     };
 
     // get the file
     let Ok(file_content) = std::fs::read_to_string(file_path) else {
         println!("Failed to open file");
         return;
-    }; 
-    
+    };
+
     // set panic hook
     std::panic::set_hook(Box::new(|info| {
         // return to normal mode
