@@ -116,9 +116,9 @@ pub struct TextEditor {
 }
 
 impl TextEditor {
-    pub fn new() -> Self {
+    pub fn new(content: &str) -> Self {
         Self {
-            text: Rope::from_str(include_str!("main.rs")),
+            text: Rope::from_str(content),
             cursor: 0,
             column: 0,
             row: 0,
@@ -134,13 +134,17 @@ impl TextEditor {
     }
 
     /// move cursor horizontally
-    /// wrap means that it can move past a newline, and go on to the next line
-    pub fn move_cursor_horizontal(&mut self, amount: isize, wrap: bool) {
+    pub fn move_cursor_horizontal(&mut self, amount: isize) {
         // just move it
-        self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));
+        self.move_cursor_horizontal_without_target(amount);
 
         // and recalculate the target column
         self.target_column = self.get_cursor_column();
+    }
+    
+    /// move the cursor horizontally without setting the target column
+    pub fn move_cursor_horizontal_without_target(&mut self, amount: isize) {
+        self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));  
     }
 
     /// move cursor vertically
@@ -168,7 +172,7 @@ impl TextEditor {
             .insert_char(self.text.byte_to_char(self.cursor), character);
 
         // move the cursor over
-        self.move_cursor_horizontal(1, false);
+        self.move_cursor_horizontal(1);
     }
 
     /// insert a newline
@@ -187,7 +191,7 @@ impl TextEditor {
             let end = self.text.byte_to_char(self.cursor);
 
             // move back
-            self.move_cursor_horizontal(-1, true);
+            self.move_cursor_horizontal(-1);
 
             // we are now at the start
             let start = self.text.byte_to_char(self.cursor);
@@ -200,7 +204,7 @@ impl TextEditor {
             let start = self.text.byte_to_char(start_byte);
 
             // move forward
-            self.move_cursor_horizontal(1, true);
+            self.move_cursor_horizontal(1);
 
             // we are now at the end
             let end = self.text.byte_to_char(self.cursor);
@@ -276,7 +280,7 @@ impl TextEditor {
 
             // move it back, if we're not at the end of the file
             if self.cursor != self.text.len_bytes() {
-                self.move_cursor_horizontal(-1, false);
+                self.move_cursor_horizontal(-1);
             }
         }
     }
@@ -357,6 +361,11 @@ impl TextEditor {
             .scroll_lines
             .max(y.saturating_sub(height.saturating_sub(height_margin + 1)))
             .min(y.saturating_sub(height_margin));
+        
+        self.scroll_columns = self
+            .scroll_columns
+            .max(x.saturating_sub(width.saturating_sub(width_margin + 1)))
+            .min(y.saturating_sub(width_margin)); 
     }
 
     /// get the currently visible buffer, as a list of lines
@@ -425,6 +434,19 @@ fn render(buffer: &str, cursor: Option<(usize, usize)>) {
 }
 
 fn terminal_main() {
+    
+    // get the file
+    let Some(file_path) = std::env::args_os().skip(1).next() else {
+        println!("Usage: mininotes <file>");
+        return;  
+    };
+
+    // get the file
+    let Ok(file_content) = std::fs::read_to_string(file_path) else {
+        println!("Failed to open file");
+        return;
+    }; 
+    
     // set panic hook
     std::panic::set_hook(Box::new(|info| {
         // return to normal mode
@@ -465,7 +487,7 @@ fn terminal_main() {
     let (mut width, mut height) = terminal::size().unwrap();
 
     // editor
-    let mut editor = TextEditor::new();
+    let mut editor = TextEditor::new(&file_content);
 
     // draw beforehand
     render(
@@ -492,9 +514,9 @@ fn terminal_main() {
                     } else if code == KeyCode::Down {
                         editor.move_cursor_vertical(1);
                     } else if code == KeyCode::Left {
-                        editor.move_cursor_horizontal(-1, true);
+                        editor.move_cursor_horizontal(-1);
                     } else if code == KeyCode::Right {
-                        editor.move_cursor_horizontal(1, true);
+                        editor.move_cursor_horizontal(1);
                     } else if code == KeyCode::Home {
                         editor.move_cursor_to_start_of_line();
                     } else if code == KeyCode::End {
