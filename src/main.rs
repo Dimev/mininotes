@@ -85,6 +85,11 @@ fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usiz
 fn rope_width(rope: RopeSlice) -> usize {
     rope.chars().map(|x| x.width_cjk().unwrap_or(0)).sum()
 }
+
+fn is_newline(c: char) -> bool {
+    c == '\n'
+}
+
 // TODO: grapheme width
 // TODO: full string kerning and the layout stuff to make it work on gui
 // TODO: helix style grapheme width to fix it breaking on missing font terminals
@@ -199,7 +204,7 @@ impl TextEditor {
         let pred_whitespace = line
             .chars()
             .take_while(
-                |x| x.is_whitespace() && *x != '\n', /* TODO: proper whitespace */
+                |x| x.is_whitespace() && !is_newline(*x)
             )
             .take(line_char_pos - line_char_start)
             .collect::<String>();
@@ -250,12 +255,11 @@ impl TextEditor {
         // move the cursor to the start of the line
         self.move_cursor_to_start_of_line();
 
-        // find the line
-        let line_end = self
-            .text
-            .line(self.text.byte_to_line(self.cursor))
-            .len_bytes()
-            + self.cursor;
+        // get the current line
+        let line = self.text.byte_to_line(self.cursor);
+
+        // find the line end
+        let line_end = self.text.line(line).len_bytes() + self.cursor;
 
         // where we are now
         let mut current_column = 0;
@@ -268,21 +272,29 @@ impl TextEditor {
             // and end byte pos to figure out the end of the grapheme
             let end_byte_pos = move_grapheme(1, self.cursor, self.text.slice(..));
 
-            // stop if it's on the next line
-            if end_byte_pos >= line_end {
+            // the bit of the rope to search in
+            let slice = self.text.slice(
+                self.text.byte_to_char(start_byte_pos)..self.text.byte_to_char(end_byte_pos),
+            );
+            
+            // stop if it contains a newline
+            if slice.chars().find(|x| is_newline(*x)).is_some() {
                 break;
             }
-
+            
             // figure out it's length
-            let grapheme_len = rope_width(self.text.slice(
-                self.text.byte_to_char(start_byte_pos)..self.text.byte_to_char(end_byte_pos),
-            ));
+            let grapheme_len = rope_width(slice);
 
             // add it to the column
             current_column += grapheme_len;
 
             // and move the cursor
             self.cursor = end_byte_pos;
+
+            // stop if it's on the next line
+            if end_byte_pos >= line_end {
+                break;
+            }
         }
     }
 
@@ -306,8 +318,8 @@ impl TextEditor {
             // move it to the next one
             self.cursor = next_line_start;
 
-            // move it back, if we're not at the end of the file
-            if self.cursor != self.text.len_bytes() {
+            // move it back, if we're not at the last line
+            if line + 1 < self.text.len_lines() {
                 self.move_cursor_horizontal(-1);
             }
         }
