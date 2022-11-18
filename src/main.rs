@@ -399,13 +399,13 @@ impl TextEditor {
 
         self.scroll_lines = self
             .scroll_lines
-            .max(y.saturating_sub(height.saturating_sub(height_margin + 1)))
-            .min(y.saturating_sub(height_margin));
+            .max(y.saturating_sub(height.saturating_sub(height_margin.min(height / 2) + 1)))
+            .min(y.saturating_sub(height_margin.min(height / 2)));
 
         self.scroll_columns = self
             .scroll_columns
-            .max(x.saturating_sub(width.saturating_sub(width_margin + 1)))
-            .min(y.saturating_sub(width_margin));
+            .max(x.saturating_sub(width.saturating_sub(width_margin.min(width / 2) + 1)))
+            .min(x.saturating_sub(width_margin.min(width / 2)));
     }
 
     /// get the currently visible buffer, as a list of lines
@@ -456,6 +456,33 @@ impl TextEditor {
     }
 }
 
+/// iterator over the characters in the visible buffer
+pub struct TextEditorBuffer<'a> {
+    /// current width of the buffer
+    width: usize,
+    
+    /// current height of the buffer
+    height: usize,
+    
+    /// editor
+    editor: &'a TextEditor,
+}
+
+impl<'a> Iterator for TextEditorBuffer<'a> {
+    type Item = char;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+        
+        // iterate over the lines
+        
+        // iterate over all characters and their column
+        
+        // now filter out the ones we don't want and instead emit a space in that case
+        
+    }
+}
+
 // terminal ==============================================
 
 fn render(buffer: &str, cursor: Option<(usize, usize)>) {
@@ -463,7 +490,44 @@ fn render(buffer: &str, cursor: Option<(usize, usize)>) {
     queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
 
     // TODO: diff
+    // iterate over all characters and keep track of their column and row
+    // if the column exceeds the width, go to the next row
+    // then zip with the previous buffer and filter out the ones that changed
+    // then do this
+    /*let mut diff = Vec::new();
 
+        // previous x value
+        let mut prev_x = 0;
+        let mut prev_y = 0;
+
+        // get the changes
+        let changes = self.get_changed_cells();
+
+        // actually move to 0, 0, if there's any changes
+        if changes.len() > 0 {
+            diff.push(CharOrJump::Jump(0, 0));
+        }
+
+        // go over all items, loop wise
+        for (x, y, change) in changes {
+            // if we're not where the pointer would have advanced to
+            // move to where we should be
+            if prev_x + 1 != x || prev_y != y || prev_x == 0 {
+                diff.push(CharOrJump::Jump(x, y));
+            }
+
+            // emit the change
+            diff.push(CharOrJump::Char(change));
+
+            // remember x
+            prev_x = x;
+            prev_y = y;
+        }
+
+        diff
+    */
+    
+    
     // set cursor
     if let Some((x, y)) = cursor {
         queue!(stdout(), cursor::Show, cursor::MoveTo(x as u16, y as u16)).unwrap();
