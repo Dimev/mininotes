@@ -335,7 +335,7 @@ impl TextEditor {
     }
 
     /// get the current position of the column the cursor is on, assuming a terminal program
-    pub fn get_cursor_column(&self) -> usize {i
+    pub fn get_cursor_column(&self) -> usize {
         // TODO: also make this generic
         // using the same trick as in move cursor to column
         // effectively rasterize a line when going to it, then search in the laid out text to find where the cursor is
