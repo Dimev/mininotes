@@ -112,6 +112,9 @@ pub struct TextEditor {
 
     /// cursor target column
     target_column: usize,
+    
+    /// cursor position and it's calculated column, if known
+    current_column: Option<(usize, usize)>,
 
     /// scolled lines
     scroll_lines: usize,
@@ -128,6 +131,7 @@ impl TextEditor {
             column: 0,
             row: 0,
             target_column: 0,
+            current_column: None,
             scroll_lines: 0,
             scroll_columns: 0,
         }
@@ -252,6 +256,11 @@ impl TextEditor {
 
     /// move the cursor to a specific column, assuming a terminal program
     pub fn move_cursor_to_column(&mut self, column: usize) {
+        // TODO: make this generic, together with get cursor column
+        // let it take in a function that lays out the text for the line, and then returns the positions 
+        // of all text items with their byte index (either with iterator or vec)
+        // store this in the TextEditor so later a binary or linear search can be done easier to figure out the right grapheme to select
+        
         // move the cursor to the start of the line
         self.move_cursor_to_start_of_line();
 
@@ -326,7 +335,11 @@ impl TextEditor {
     }
 
     /// get the current position of the column the cursor is on, assuming a terminal program
-    pub fn get_cursor_column(&self) -> usize {
+    pub fn get_cursor_column(&self) -> usize {i
+        // TODO: also make this generic
+        // using the same trick as in move cursor to column
+        // effectively rasterize a line when going to it, then search in the laid out text to find where the cursor is
+        
         // get the line and line number
         let line = self.text.byte_to_line(self.cursor);
 
