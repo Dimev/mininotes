@@ -2,8 +2,8 @@
 use crossterm::{
     cursor,
     event::{
-        poll, read, EnableMouseCapture, DisableMouseCapture,  Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-        MouseEvent, MouseEventKind,
+        poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute, queue, style, terminal,
 };
@@ -143,9 +143,7 @@ impl<'a> Iterator for TermLineLayout<'a> {
             let next_cursor = move_grapheme(1, self.cursor, self.line);
 
             // get the slice
-            let rope_slice = self
-                .line
-                .byte_slice(self.cursor..next_cursor);
+            let rope_slice = self.line.byte_slice(self.cursor..next_cursor);
 
             // figure out the width
             // newlines are control characters, so they will have 0 width
@@ -467,43 +465,55 @@ impl TextEditor {
             let mut cursor = 0;
 
             // get the line
-            let line = self.text.line(line_num);
+            if let Some(line) = self.text.get_line(line_num) {
+                // go over all columns until we are either out of bounds or end of the line
+                while cursor < line.len_bytes() && column < self.scroll_columns + width {
+                    // get the next cursor pos
+                    let next_cursor = move_grapheme(1, cursor, line);
 
-            // go over all columns until we are either out of bounds or end of the line
-            while cursor < line.len_bytes() && column < self.scroll_columns + width {
-                // get the next cursor pos
-                let next_cursor = move_grapheme(1, cursor, line);
+                    // get the grapheme
+                    let grapheme = line.byte_slice(cursor..next_cursor);
 
-                // get the grapheme
-                let grapheme = line.byte_slice(cursor..next_cursor);
-                
-                // stop if it's a newline
-                if grapheme.chars().any(|x| is_newline(x)) {
-                    break;
+                    // stop if it's a newline
+                    if grapheme.chars().any(|x| is_newline(x)) {
+                        break;
+                    }
+
+                    // get the grapheme width
+                    let grapheme_width = rope_width(grapheme);
+
+                    // if it doesn't fit in the buffer, pad spaces
+                    if column < self.scroll_columns
+                        && column + grapheme_width >= self.scroll_columns
+                    {
+                        buffer.extend(
+                            std::iter::repeat(' ')
+                                .take(column + grapheme_width - self.scroll_columns),
+                        );
+                    } else if column + grapheme_width >= self.scroll_columns + width {
+                        buffer.extend(
+                            std::iter::repeat(' ').take(self.scroll_columns + width - column),
+                        );
+                    } else if column >= self.scroll_columns
+                        && column + grapheme_width < self.scroll_columns + width
+                    {
+                        buffer.extend(grapheme.chars());
+                    }
+
+                    // update
+                    cursor = next_cursor;
+                    column += grapheme_width;
                 }
-                
-                // get the grapheme width
-                let grapheme_width = rope_width(grapheme);
-                
-                // if it doesn't fit in the buffer, pad spaces
-                if column < self.scroll_columns && column + grapheme_width >= self.scroll_columns {
-                    buffer.extend(std::iter::repeat(' ').take(column + grapheme_width - self.scroll_columns));
-                } else if column + grapheme_width >= self.scroll_columns + width {
-                    buffer.extend(std::iter::repeat(' ').take(self.scroll_columns + width - column));
-                } else if column >= self.scroll_columns && column + grapheme_width < self.scroll_columns + width {
-                    buffer.extend(grapheme.chars());
-                }
-                
-                // update
-                cursor = next_cursor;
-                column += grapheme_width;
             }
-            
+
             // final padding
-            buffer.extend(std::iter::repeat(' ').take((width + self.scroll_columns) - column.max(self.scroll_columns)));
+            buffer.extend(
+                std::iter::repeat(' ')
+                    .take((width + self.scroll_columns) - column.max(self.scroll_columns)),
+            );
         }
-        
-        buffer        
+
+        buffer
     }
 }
 
@@ -748,7 +758,7 @@ fn terminal_main() {
 
                     // fix cursor pos
                     editor.set_scroll(width as usize, height as usize, 6, 6);
-                
+
                     // render
                     render(
                         &editor.get_buffer(width as usize, height as usize),
