@@ -8,9 +8,11 @@ Feel free to use this as reference for whatever you want
 Current goals:
  - render to the terminal - V
  - make grapheme cluster navigation work - V
- - insert extra whitespace to match the previous line's whitespace that was before the cursor (and before the first text)
- - allow loading and saving files
- - make terminal cursor position and text layout work (including scrolling) ~ Vertical only so far
+ - insert extra whitespace to match the previous line's whitespace that was before the cursor V
+ - allow loading and saving files ~ loading done
+ - make terminal cursor position and text layout work (including scrolling) V
  - render to a gui (via minifb)
- - make gui terminal cursor position and text layout work
+ - make gui terminal position and text layout work 
  - basic undo/redo/copy/paste, status bar
+ - skip words navigation
+ - maybe bidir
