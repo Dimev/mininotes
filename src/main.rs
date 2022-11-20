@@ -1,7 +1,9 @@
 // terminal deps
 use crossterm::{
     cursor,
-    event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        poll, read, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture,
+    },
     execute, queue, style, terminal,
 };
 
@@ -82,17 +84,94 @@ fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usiz
     byte_cursor
 }
 
+// TODO: force the rope to be 1 wide if it's not fully newlines
+// this fixes terminal layout
 fn rope_width(rope: RopeSlice) -> usize {
     rope.chars().map(|x| x.width_cjk().unwrap_or(0)).sum()
 }
 
+// TODO: all newlines
 fn is_newline(c: char) -> bool {
     c == '\n'
 }
 
-// TODO: grapheme width
-// TODO: full string kerning and the layout stuff to make it work on gui
-// TODO: helix style grapheme width to fix it breaking on missing font terminals
+// terminal layout ===========================================
+
+/// grapheme information
+pub struct GraphemePosition {
+    /// where it starts
+    pub start_column: usize,
+
+    /// where it ends
+    pub end_column: usize,
+
+    /// and where the cursor is in the string, in bytes
+    pub cursor: usize,
+}
+
+/// iterator state
+pub struct TermLineLayout<'a> {
+    // TODO: generic text layout algo
+    /// line
+    line: RopeSlice<'a>,
+
+    /// where the cursor currently is
+    cursor: usize,
+
+    /// current column
+    column: usize,
+}
+
+impl<'a> TermLineLayout<'a> {
+    pub fn new(line: RopeSlice<'a>) -> Self {
+        Self {
+            line,
+            cursor: 0,
+            column: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for TermLineLayout<'a> {
+    type Item = GraphemePosition;
+
+    fn next(&mut self) -> Option<GraphemePosition> {
+        // stop if we are at the end
+        if self.cursor == self.line.len_bytes() {
+            None
+        } else {
+            // advance one char
+            let next_cursor = move_grapheme(1, self.cursor, self.line);
+
+            // get the slice
+            let rope_slice = self
+                .line
+                .slice(self.line.byte_to_char(self.cursor)..self.line.byte_to_char(next_cursor));
+
+            // figure out the width
+            // newlines are control characters, so they will have 0 width
+            let grapheme_width = rope_width(rope_slice);
+
+            // make the found grapheme
+            let grapheme = GraphemePosition {
+                start_column: self.column,
+                end_column: self.column + grapheme_width,
+                cursor: self.cursor,
+            };
+
+            // move the cursor
+            self.cursor = next_cursor;
+
+            // update where we are
+            self.column += grapheme_width;
+
+            // and return
+            Some(grapheme)
+        }
+    }
+}
+
+// TODO: helix style grapheme width to fix it breaking on missing font terminals -> seems to just force the cursor to move to the right position
 
 // editor ====================================================
 
@@ -112,9 +191,6 @@ pub struct TextEditor {
 
     /// cursor target column
     target_column: usize,
-    
-    /// cursor position and it's calculated column, if known
-    current_column: Option<(usize, usize)>,
 
     /// scolled lines
     scroll_lines: usize,
@@ -131,28 +207,24 @@ impl TextEditor {
             column: 0,
             row: 0,
             target_column: 0,
-            current_column: None,
             scroll_lines: 0,
             scroll_columns: 0,
         }
     }
 
-    /// get  the character under the cursor
-    pub fn get_character_under_cursor(&self) -> char {
-        todo!()
-    }
-
-    /// move cursor horizontally
-    pub fn move_cursor_horizontal(&mut self, amount: isize) {
+    /// move cursor horizontally, and save the cursor column if needed
+    pub fn move_cursor_horizontal(&mut self, amount: isize, save_column: bool) {
         // just move it
         self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));
 
         // and recalculate the target column
-        self.target_column = self.get_cursor_column();
+        if save_column {
+            self.target_column = self.get_cursor_column();
+        }
     }
 
-    /// move cursor vertically
-    pub fn move_cursor_vertical(&mut self, amount: isize) {
+    /// move cursor vertically, and save the column if needed
+    pub fn move_cursor_vertical(&mut self, amount: isize, save_column: bool) {
         // find where the next line is
         let next_line = (self.text.byte_to_line(self.cursor) as isize + amount)
             .max(0)
@@ -166,7 +238,7 @@ impl TextEditor {
         self.row = next_line;
 
         // move horizontally until we are at the target
-        self.move_cursor_to_column(self.target_column);
+        self.move_cursor_to_column(self.target_column, save_column);
     }
 
     /// insert a character
@@ -176,7 +248,7 @@ impl TextEditor {
             .insert_char(self.text.byte_to_char(self.cursor), character);
 
         // move the cursor over
-        self.move_cursor_horizontal(1);
+        self.move_cursor_horizontal(1, true);
     }
 
     /// insert a string
@@ -186,7 +258,7 @@ impl TextEditor {
             .insert(self.text.byte_to_char(self.cursor), string);
 
         // move the cursor over
-        self.move_cursor_horizontal(string.graphemes(true).count() as isize);
+        self.move_cursor_horizontal(string.graphemes(true).count() as isize, true);
     }
 
     /// insert a newline
@@ -207,9 +279,7 @@ impl TextEditor {
         // figure out the whitespaces preceeding that line, up to
         let pred_whitespace = line
             .chars()
-            .take_while(
-                |x| x.is_whitespace() && !is_newline(*x)
-            )
+            .take_while(|x| x.is_whitespace() && !is_newline(*x))
             .take(line_char_pos - line_char_start)
             .collect::<String>();
 
@@ -228,7 +298,7 @@ impl TextEditor {
             let end = self.text.byte_to_char(self.cursor);
 
             // move back
-            self.move_cursor_horizontal(-1);
+            self.move_cursor_horizontal(-1, true);
 
             // we are now at the start
             let start = self.text.byte_to_char(self.cursor);
@@ -241,7 +311,7 @@ impl TextEditor {
             let start = self.text.byte_to_char(start_byte);
 
             // move forward
-            self.move_cursor_horizontal(1);
+            self.move_cursor_horizontal(1, true);
 
             // we are now at the end
             let end = self.text.byte_to_char(self.cursor);
@@ -255,65 +325,35 @@ impl TextEditor {
     }
 
     /// move the cursor to a specific column, assuming a terminal program
-    pub fn move_cursor_to_column(&mut self, column: usize) {
-        // TODO: make this generic, together with get cursor column
-        // let it take in a function that lays out the text for the line, and then returns the positions 
-        // of all text items with their byte index (either with iterator or vec)
-        // store this in the TextEditor so later a binary or linear search can be done easier to figure out the right grapheme to select
-        
+    pub fn move_cursor_to_column(&mut self, column: usize, save_column: bool) {
         // move the cursor to the start of the line
-        self.move_cursor_to_start_of_line();
+        self.move_cursor_to_start_of_line(save_column);
 
         // get the current line
-        let line = self.text.byte_to_line(self.cursor);
+        let line = self.text.line(self.text.byte_to_line(self.cursor));
 
-        // find the line end
-        let line_end = self.text.line(line).len_bytes() + self.cursor;
-
-        // where we are now
-        let mut current_column = 0;
-
-        // go one to the right untill we are at the right position
-        while current_column < column {
-            // start byte pos
-            let start_byte_pos = self.cursor;
-
-            // and end byte pos to figure out the end of the grapheme
-            let end_byte_pos = move_grapheme(1, self.cursor, self.text.slice(..));
-
-            // the bit of the rope to search in
-            let slice = self.text.slice(
-                self.text.byte_to_char(start_byte_pos)..self.text.byte_to_char(end_byte_pos),
-            );
-            
-            // stop if it contains a newline
-            if slice.chars().find(|x| is_newline(*x)).is_some() {
-                break;
-            }
-            
-            // figure out it's length
-            let grapheme_len = rope_width(slice);
-
-            // add it to the column
-            current_column += grapheme_len;
-
-            // and move the cursor
-            self.cursor = end_byte_pos;
-
-            // stop if it's on the next line
-            if end_byte_pos >= line_end {
-                break;
-            }
+        // layout the line, and find the right grapheme that contains our column, or at least the one closest to it
+        if let Some(cursor) = TermLineLayout::new(line)
+            .find(|x| (x.start_column..x.end_column).contains(&column))
+            .map(|x| self.cursor + x.cursor)
+        {
+            self.cursor = cursor;
+        } else {
+            // otherwise, move it to the end of the line, as that would be expected
+            self.move_cursor_to_end_of_line(save_column);
         }
     }
 
     /// move the cursor to the start of the line
-    pub fn move_cursor_to_start_of_line(&mut self) {
+    pub fn move_cursor_to_start_of_line(&mut self, save_column: bool) {
         self.cursor = self.text.line_to_byte(self.text.byte_to_line(self.cursor));
+        if save_column {
+            self.column = 0;
+        }
     }
 
     /// move the cursor to the end of the line
-    pub fn move_cursor_to_end_of_line(&mut self) {
+    pub fn move_cursor_to_end_of_line(&mut self, save_column: bool) {
         // do nothing if we are at the end of the file
         if self.cursor != self.text.len_bytes() {
             // move it to the start of the next line
@@ -329,50 +369,29 @@ impl TextEditor {
 
             // move it back, if we're not at the last line
             if line + 1 < self.text.len_lines() {
-                self.move_cursor_horizontal(-1);
+                self.move_cursor_horizontal(-1, save_column);
             }
         }
     }
 
     /// get the current position of the column the cursor is on, assuming a terminal program
     pub fn get_cursor_column(&self) -> usize {
-        // TODO: also make this generic
-        // using the same trick as in move cursor to column
-        // effectively rasterize a line when going to it, then search in the laid out text to find where the cursor is
-        
-        // get the line and line number
-        let line = self.text.byte_to_line(self.cursor);
+        // get the line number
+        let line_num = self.text.byte_to_line(self.cursor);
 
-        // where it starts
-        let line_byte_idx = self.text.line_to_byte(line);
+        // get the line
+        let line = self.text.line(line_num);
 
-        // current byte position
-        let mut byte_pos = line_byte_idx;
+        // and the start of the line
+        let line_start = self.text.line_to_byte(line_num);
 
-        // current horizontal position
-        let mut column = 0;
-
-        // now figure out where we are on the line
-        while byte_pos < self.cursor {
-            // start byte pos
-            let start_byte_pos = byte_pos;
-
-            // and end byte pos to figure out the end of the grapheme
-            let end_byte_pos = move_grapheme(1, byte_pos, self.text.slice(..));
-
-            // figure out it's length
-            let grapheme_len = rope_width(self.text.slice(
-                self.text.byte_to_char(start_byte_pos)..self.text.byte_to_char(end_byte_pos),
-            ));
-
-            // add it to the column
-            column += grapheme_len;
-
-            // move the byte pos
-            byte_pos = end_byte_pos;
-        }
-
-        column
+        // find the column
+        // not using find directly here, as that may not properly find the end of the string
+        TermLineLayout::new(line)
+            .take_while(|x| x.cursor + line_start < self.cursor)
+            .last()
+            .map(|x| x.end_column)
+            .unwrap_or(0)
     }
 
     /// get the cursor pos, assuming a terminal program
@@ -396,6 +415,27 @@ impl TextEditor {
             x.checked_sub(self.scroll_columns)?,
             y.checked_sub(self.scroll_lines)?,
         ))
+    }
+
+    /// set the cursor pos
+    pub fn set_cursor_pos(&mut self, x: usize, y: usize) {
+        // find the line
+        let line = y.min(self.text.len_lines());
+
+        // find where the line start
+        let line_start = self.text.line_to_byte(line);
+
+        // move cursor to the right line
+        self.cursor = line_start;
+
+        // and move the cursor to the right column
+        self.move_cursor_to_column(x, true);
+    }
+
+    /// set the cursor pos, relative to scrolling
+    pub fn set_relative_cursor_pos(&mut self, x: usize, y: usize) {
+        // set with the absolute coords
+        self.set_cursor_pos(x + self.scroll_columns, y + self.scroll_lines);
     }
 
     /// set the right scrolling values so the text stays in frame
@@ -473,26 +513,30 @@ impl TextEditor {
 pub struct TextEditorBuffer<'a> {
     /// current width of the buffer
     width: usize,
-    
+
     /// current height of the buffer
     height: usize,
-    
+
     /// editor
     editor: &'a TextEditor,
 }
 
 impl<'a> Iterator for TextEditorBuffer<'a> {
     type Item = char;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         todo!()
-        
-        // iterate over the lines
-        
-        // iterate over all characters and their column
-        
-        // now filter out the ones we don't want and instead emit a space in that case
-        
+
+        // init state: line scroll column scroll, cursor = start of line scroll
+
+        // iter:
+        // if the current position is out of bounds, return nothing
+        // try to emit character from current grapheme slice
+        // if there is none, emit the current position
+        // before returning:
+        // find next cursor position for grapheme
+        // set the new grapheme slice
+        // return
     }
 }
 
@@ -539,8 +583,7 @@ fn render(buffer: &str, cursor: Option<(usize, usize)>) {
 
         diff
     */
-    
-    
+
     // set cursor
     if let Some((x, y)) = cursor {
         queue!(stdout(), cursor::Show, cursor::MoveTo(x as u16, y as u16)).unwrap();
@@ -598,6 +641,7 @@ fn terminal_main() {
         terminal::EnterAlternateScreen,
         terminal::Clear(terminal::ClearType::Purge),
         cursor::MoveTo(0, 0),
+        EnableMouseCapture,
     )
     .unwrap();
 
@@ -618,6 +662,24 @@ fn terminal_main() {
         if poll(std::time::Duration::from_millis(100)).unwrap() {
             // input
             match read().unwrap() {
+                Event::Mouse(MouseEvent {
+                    row,
+                    column,
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    ..
+                }) => {
+                    // mouse move
+                    editor.set_relative_cursor_pos(column as usize, row as usize);
+
+                    // fix scrolling before rendering
+                    editor.set_scroll(width as usize, height as usize, 6, 6);
+
+                    // render
+                    render(
+                        &editor.get_buffer(width as usize, height as usize),
+                        editor.get_relative_cursor_pos(),
+                    );
+                }
                 Event::Key(KeyEvent {
                     code, modifiers, ..
                 }) => {
@@ -628,17 +690,17 @@ fn terminal_main() {
 
                     // move cursor
                     if code == KeyCode::Up {
-                        editor.move_cursor_vertical(-1);
+                        editor.move_cursor_vertical(-1, false);
                     } else if code == KeyCode::Down {
-                        editor.move_cursor_vertical(1);
+                        editor.move_cursor_vertical(1, false);
                     } else if code == KeyCode::Left {
-                        editor.move_cursor_horizontal(-1);
+                        editor.move_cursor_horizontal(-1, true);
                     } else if code == KeyCode::Right {
-                        editor.move_cursor_horizontal(1);
+                        editor.move_cursor_horizontal(1, true);
                     } else if code == KeyCode::Home {
-                        editor.move_cursor_to_start_of_line();
+                        editor.move_cursor_to_start_of_line(true);
                     } else if code == KeyCode::End {
-                        editor.move_cursor_to_end_of_line();
+                        editor.move_cursor_to_end_of_line(true);
                     }
                     // insert text
                     else if let KeyCode::Char(c) = code {
@@ -676,8 +738,8 @@ fn terminal_main() {
                 _ => (),
             }
         } else {
-            // poll editor
-            // TODO!
+            // do nothing!
+            // at least here, if you are running an lsp or something else, you might want to check that
         }
     }
 
@@ -692,6 +754,11 @@ fn terminal_main() {
     terminal::disable_raw_mode().unwrap();
 
     println!("Done");
+}
+
+// gui ===============================================================
+fn gui_main() {
+    todo!()
 }
 
 fn main() {
