@@ -2,7 +2,8 @@
 use crossterm::{
     cursor,
     event::{
-        poll, read, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture,
+        poll, read, EnableMouseCapture, DisableMouseCapture,  Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
+        MouseEvent, MouseEventKind,
     },
     execute, queue, style, terminal,
 };
@@ -10,7 +11,7 @@ use crossterm::{
 use std::io::{stdout, Write};
 
 // editor deps
-use ropey::{Rope, RopeSlice};
+use ropey::{iter::Chars, Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 use unicode_width::UnicodeWidthChar;
 
@@ -32,8 +33,6 @@ fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usiz
 
     // loop for as long as needed
     for _ in 0..amount.abs() {
-        // TODO: stop if we are at a newline if wrap is disabled
-
         loop {
             match if amount > 0 {
                 cursor.next_boundary(chunk, chunk_idx)
@@ -146,7 +145,7 @@ impl<'a> Iterator for TermLineLayout<'a> {
             // get the slice
             let rope_slice = self
                 .line
-                .slice(self.line.byte_to_char(self.cursor)..self.line.byte_to_char(next_cursor));
+                .byte_slice(self.cursor..next_cursor);
 
             // figure out the width
             // newlines are control characters, so they will have 0 width
@@ -176,18 +175,14 @@ impl<'a> Iterator for TermLineLayout<'a> {
 // editor ====================================================
 
 /// multiline text editor
+// TODO: const generics (?) to also make it work as a single line editor
+// this disables the multi-line editing features, and fails to create when the input text has newlines in it
 pub struct TextEditor {
     /// text
     text: Rope,
 
     /// cursor position, in bytes
     cursor: usize,
-
-    /// current column the cursor is on
-    column: usize,
-
-    /// current row the cursor is on
-    row: usize,
 
     /// cursor target column
     target_column: usize,
@@ -204,8 +199,6 @@ impl TextEditor {
         Self {
             text: Rope::from_str(content),
             cursor: 0,
-            column: 0,
-            row: 0,
             target_column: 0,
             scroll_lines: 0,
             scroll_columns: 0,
@@ -232,10 +225,6 @@ impl TextEditor {
 
         // find where it starts and move there
         self.cursor = self.text.line_to_byte(next_line);
-
-        // we are now at column 0, and a new row
-        self.column = 0;
-        self.row = next_line;
 
         // move horizontally until we are at the target
         self.move_cursor_to_column(self.target_column, save_column);
@@ -348,7 +337,7 @@ impl TextEditor {
     pub fn move_cursor_to_start_of_line(&mut self, save_column: bool) {
         self.cursor = self.text.line_to_byte(self.text.byte_to_line(self.cursor));
         if save_column {
-            self.column = 0;
+            self.target_column = 0;
         }
     }
 
@@ -462,50 +451,59 @@ impl TextEditor {
     }
 
     /// get the currently visible buffer, as a list of lines
+    /// this is assuming a terminal editor, and should not be used when doing a gui editor
     // TODO: ITERATOR!
+    // TODO: position + slice
     pub fn get_buffer(&self, width: usize, height: usize) -> String {
         // all found text lines
-        //let mut lines = String::new();
+        let mut buffer = String::new();
 
-        // go over the lines in the buffer
-        let lines = (self.scroll_lines..self.scroll_lines + height)
-            .into_iter()
-            .map(|i| {
-                // get the line in the buffer, right padded with spaces
-                // until it's too long to fit in the buffer
+        // go over all lines in the buffer
+        for line_num in self.scroll_lines..self.scroll_lines + height {
+            // current column
+            let mut column = 0;
 
-                self.text
-                    .get_line(i)
-                    .map(|x| x.chars())
-                    .into_iter()
-                    .flatten()
-                    .chain(std::iter::repeat(' '))
-                    .scan(0, |state, c| {
-                        if *state < width {
-                            Some(
-                                c.width_cjk()
-                                    .filter(|w| *state + w < width)
-                                    .map(|width| {
-                                        // TODO: fix this, idk how
-                                        // TODO: tabs
-                                        *state += width;
-                                        c
-                                    })
-                                    .unwrap_or_else(|| {
-                                        *state += 1;
-                                        ' '
-                                    }),
-                            )
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .flatten()
-            .collect();
+            // current cursor in the column
+            let mut cursor = 0;
 
-        // return the buffer
-        lines
+            // get the line
+            let line = self.text.line(line_num);
+
+            // go over all columns until we are either out of bounds or end of the line
+            while cursor < line.len_bytes() && column < self.scroll_columns + width {
+                // get the next cursor pos
+                let next_cursor = move_grapheme(1, cursor, line);
+
+                // get the grapheme
+                let grapheme = line.byte_slice(cursor..next_cursor);
+                
+                // stop if it's a newline
+                if grapheme.chars().any(|x| is_newline(x)) {
+                    break;
+                }
+                
+                // get the grapheme width
+                let grapheme_width = rope_width(grapheme);
+                
+                // if it doesn't fit in the buffer, pad spaces
+                if column < self.scroll_columns && column + grapheme_width >= self.scroll_columns {
+                    buffer.extend(std::iter::repeat(' ').take(column + grapheme_width - self.scroll_columns));
+                } else if column + grapheme_width >= self.scroll_columns + width {
+                    buffer.extend(std::iter::repeat(' ').take(self.scroll_columns + width - column));
+                } else if column >= self.scroll_columns && column + grapheme_width < self.scroll_columns + width {
+                    buffer.extend(grapheme.chars());
+                }
+                
+                // update
+                cursor = next_cursor;
+                column += grapheme_width;
+            }
+            
+            // final padding
+            buffer.extend(std::iter::repeat(' ').take((width + self.scroll_columns) - column.max(self.scroll_columns)));
+        }
+        
+        buffer        
     }
 }
 
@@ -517,16 +515,26 @@ pub struct TextEditorBuffer<'a> {
     /// current height of the buffer
     height: usize,
 
+    /// current column
+    column: usize,
+
+    /// current row
+    row: usize,
+
     /// editor
     editor: &'a TextEditor,
+
+    /// current cursor position, in bytes
+    cursor: usize,
+
+    /// current characters that need to be emitted
+    remaining_chars: Option<Chars<'a>>,
 }
 
 impl<'a> Iterator for TextEditorBuffer<'a> {
-    type Item = char;
+    type Item = (u16, u16, char);
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
-
         // init state: line scroll column scroll, cursor = start of line scroll
 
         // iter:
@@ -537,6 +545,14 @@ impl<'a> Iterator for TextEditorBuffer<'a> {
         // find next cursor position for grapheme
         // set the new grapheme slice
         // return
+
+        if self.row >= self.height + self.editor.scroll_lines {
+            None
+        } else if let Some(character) = self.remaining_chars.as_mut().map(|x| x.next()).flatten() {
+            None
+        } else {
+            None
+        }
     }
 }
 
@@ -616,6 +632,7 @@ fn terminal_main() {
             terminal::LeaveAlternateScreen,
             style::ResetColor,
             cursor::MoveTo(0, terminal::size().unwrap().1),
+            DisableMouseCapture,
             cursor::Show
         )
         .unwrap();
@@ -654,7 +671,7 @@ fn terminal_main() {
     // draw beforehand
     render(
         &editor.get_buffer(width as usize, height as usize),
-        Some(editor.get_cursor_pos()),
+        editor.get_relative_cursor_pos(),
     );
 
     // event loop
@@ -729,10 +746,13 @@ fn terminal_main() {
                     width = terminal::size().unwrap().0;
                     height = terminal::size().unwrap().1;
 
+                    // fix cursor pos
+                    editor.set_scroll(width as usize, height as usize, 6, 6);
+                
                     // render
                     render(
                         &editor.get_buffer(width as usize, height as usize),
-                        Some(editor.get_cursor_pos()),
+                        editor.get_relative_cursor_pos(),
                     );
                 }
                 _ => (),
@@ -748,6 +768,7 @@ fn terminal_main() {
         stdout(),
         terminal::LeaveAlternateScreen,
         cursor::MoveTo(0, terminal::size().unwrap().1),
+        DisableMouseCapture,
         cursor::Show,
     )
     .unwrap();
