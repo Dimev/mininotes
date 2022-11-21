@@ -11,7 +11,7 @@ use crossterm::{
 use std::io::{stdout, Write};
 
 // editor deps
-use ropey::{iter::Chars, Rope, RopeSlice};
+use ropey::{Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 use unicode_width::UnicodeWidthChar;
 
@@ -175,6 +175,8 @@ impl<'a> Iterator for TermLineLayout<'a> {
 /// multiline text editor
 // TODO: const generics (?) to also make it work as a single line editor
 // this disables the multi-line editing features, and fails to create when the input text has newlines in it
+// TODO: seperate scroll state
+// TODO: correct generic line layout iterator
 pub struct TextEditor {
     /// text
     text: Rope,
@@ -380,6 +382,27 @@ impl TextEditor {
             .map(|x| x.end_column)
             .unwrap_or(0)
     }
+    
+    /// get the row and column
+    /// this is equivalent to getting the cursor position assuming a terminal text layout
+    pub fn get_row_and_column(&self) -> (usize, usize) {
+        // get the line
+        let line_num = self.text.byte_to_line(self.cursor);
+        
+        // get the real line
+        let line = self.text.line(line_num);
+        
+        // get where it starts
+        let line_start = self.text.line_to_char(line_num);
+        
+        // get where we are, in chars
+        let line_pos = self.text.byte_to_char(self.cursor) - line_start;
+        
+        // and loop over the line until we are at the right width
+        let column = line.chars().take(line_pos).map(|x| x.width_cjk().unwrap_or(0)).sum();
+        
+        (column, line_num)
+    }
 
     /// get the cursor pos, assuming a terminal program
     /// this is the true cursor position, not adjusted by scrolling
@@ -450,8 +473,7 @@ impl TextEditor {
 
     /// get the currently visible buffer, as a list of lines
     /// this is assuming a terminal editor, and should not be used when doing a gui editor
-    // TODO: ITERATOR!
-    // TODO: position + slice
+    // TODO: compose: this uses  the calculated char position to select from either string
     pub fn get_buffer(&self, width: usize, height: usize) -> String {
         // all found text lines
         let mut buffer = String::new();
@@ -490,10 +512,14 @@ impl TextEditor {
                             std::iter::repeat(' ')
                                 .take(column + grapheme_width - self.scroll_columns),
                         );
+                        
+                    // if we exceed the line, pad spaces instead
                     } else if column + grapheme_width >= self.scroll_columns + width {
                         buffer.extend(
                             std::iter::repeat(' ').take(self.scroll_columns + width - column),
                         );
+                        
+                    // otherwise, add our characters
                     } else if column >= self.scroll_columns
                         && column + grapheme_width < self.scroll_columns + width
                     {
@@ -517,62 +543,22 @@ impl TextEditor {
     }
 }
 
-/// iterator over the characters in the visible buffer
-pub struct TextEditorBuffer<'a> {
-    /// current width of the buffer
-    width: usize,
-
-    /// current height of the buffer
-    height: usize,
-
-    /// current column
-    column: usize,
-
-    /// current row
-    row: usize,
-
-    /// editor
-    editor: &'a TextEditor,
-
-    /// current cursor position, in bytes
-    cursor: usize,
-
-    /// current characters that need to be emitted
-    remaining_chars: Option<Chars<'a>>,
-}
-
-impl<'a> Iterator for TextEditorBuffer<'a> {
-    type Item = (u16, u16, char);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // init state: line scroll column scroll, cursor = start of line scroll
-
-        // iter:
-        // if the current position is out of bounds, return nothing
-        // try to emit character from current grapheme slice
-        // if there is none, emit the current position
-        // before returning:
-        // find next cursor position for grapheme
-        // set the new grapheme slice
-        // return
-
-        if self.row >= self.height + self.editor.scroll_lines {
-            None
-        } else if let Some(character) = self.remaining_chars.as_mut().map(|x| x.next()).flatten() {
-            None
-        } else {
-            None
-        }
-    }
-}
-
 // terminal ==============================================
+
+// TODO: horizontal and vertical compose, so multiple buffers can be next to eachother
+// keeps track of the width of graphemes
+// if one goes beyond the width, switch to the other iterator
+// should be simpler due to dealing with strings, and not iterators, although less efficient
 
 fn render(buffer: &str, cursor: Option<(usize, usize)>) {
     // print editor
     queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
 
     // TODO: diff
+    // check the graphemes of both
+    // if one grapheme is different than the other, force emit set cursor pos and then the difference
+    // different means their positions are different or their content is different
+    
     // iterate over all characters and keep track of their column and row
     // if the column exceeds the width, go to the next row
     // then zip with the previous buffer and filter out the ones that changed

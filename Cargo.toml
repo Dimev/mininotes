@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 crossterm = "0.25.0"
+minifb = "0.23.0"
 ropey = "1.5.0"
+swash = "0.1.5"
 unicode-segmentation = "1.10.0"
 unicode-width = "0.1.10"
