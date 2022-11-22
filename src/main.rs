@@ -13,7 +13,7 @@ use std::io::{stdout, Write};
 // editor deps
 use ropey::{Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // unicode tools =============================================
 
@@ -382,26 +382,30 @@ impl TextEditor {
             .map(|x| x.end_column)
             .unwrap_or(0)
     }
-    
+
     /// get the row and column
     /// this is equivalent to getting the cursor position assuming a terminal text layout
     pub fn get_row_and_column(&self) -> (usize, usize) {
         // get the line
         let line_num = self.text.byte_to_line(self.cursor);
-        
+
         // get the real line
         let line = self.text.line(line_num);
-        
+
         // get where it starts
         let line_start = self.text.line_to_char(line_num);
-        
+
         // get where we are, in chars
         let line_pos = self.text.byte_to_char(self.cursor) - line_start;
-        
+
         // and loop over the line until we are at the right width
-        let column = line.chars().take(line_pos).map(|x| x.width_cjk().unwrap_or(0)).sum();
-        
-        (column, line_num)
+        let column = line
+            .chars()
+            .take(line_pos)
+            .map(|x| x.width_cjk().unwrap_or(0))
+            .sum();
+
+        (line_num, column)
     }
 
     /// get the cursor pos, assuming a terminal program
@@ -470,11 +474,43 @@ impl TextEditor {
             .max(x.saturating_sub(width.saturating_sub(width_margin.min(width / 2) + 1)))
             .min(x.saturating_sub(width_margin.min(width / 2)));
     }
+}
 
+// terminal ==============================================
+
+/// terminal rendering trait
+trait TerminalBuffer {
+    fn get_buffer(&self, width: usize, height: usize) -> String;
+
+    /// compose the buffer vertically, top and bottom
+    fn compose_vertical<T: TerminalBuffer>(
+        &self,
+        other: T,
+        width: usize,
+        height: usize,
+        split: usize,
+    ) -> String {
+        let top = self.get_buffer(width, split);
+        let bottom = other.get_buffer(width, height - split);
+        top.chars().chain(bottom.chars()).collect()
+    }
+}
+
+impl TerminalBuffer for String {
+    fn get_buffer(&self, width: usize, height: usize) -> String {
+        // simply add extra padding
+        // TODO: also cut off if said padding doesn't work correctly
+        self.chars()
+            .chain(std::iter::repeat(' ').take(width * height - self.width_cjk()))
+            .collect()
+    }
+}
+
+impl TerminalBuffer for TextEditor {
     /// get the currently visible buffer, as a list of lines
     /// this is assuming a terminal editor, and should not be used when doing a gui editor
     // TODO: compose: this uses  the calculated char position to select from either string
-    pub fn get_buffer(&self, width: usize, height: usize) -> String {
+    fn get_buffer(&self, width: usize, height: usize) -> String {
         // all found text lines
         let mut buffer = String::new();
 
@@ -512,13 +548,13 @@ impl TextEditor {
                             std::iter::repeat(' ')
                                 .take(column + grapheme_width - self.scroll_columns),
                         );
-                        
+
                     // if we exceed the line, pad spaces instead
                     } else if column + grapheme_width >= self.scroll_columns + width {
                         buffer.extend(
                             std::iter::repeat(' ').take(self.scroll_columns + width - column),
                         );
-                        
+
                     // otherwise, add our characters
                     } else if column >= self.scroll_columns
                         && column + grapheme_width < self.scroll_columns + width
@@ -543,14 +579,25 @@ impl TextEditor {
     }
 }
 
-// terminal ==============================================
-
 // TODO: horizontal and vertical compose, so multiple buffers can be next to eachother
 // keeps track of the width of graphemes
 // if one goes beyond the width, switch to the other iterator
 // should be simpler due to dealing with strings, and not iterators, although less efficient
 
-fn render(buffer: &str, cursor: Option<(usize, usize)>) {
+/// render to the terminal, with differencing to not redraw the whole screen
+fn render(editor: &TextEditor, width: usize, height: usize, filename: &str) {
+    let buffer = editor.compose_vertical(
+        format!(
+            " {} {}:{}",
+            filename,
+            editor.get_row_and_column().0 + 1,
+            editor.get_row_and_column().1 + 1
+        ),
+        width,
+        height,
+        height.saturating_sub(1),
+    );
+
     // print editor
     queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
 
@@ -558,7 +605,7 @@ fn render(buffer: &str, cursor: Option<(usize, usize)>) {
     // check the graphemes of both
     // if one grapheme is different than the other, force emit set cursor pos and then the difference
     // different means their positions are different or their content is different
-    
+
     // iterate over all characters and keep track of their column and row
     // if the column exceeds the width, go to the next row
     // then zip with the previous buffer and filter out the ones that changed
@@ -597,7 +644,7 @@ fn render(buffer: &str, cursor: Option<(usize, usize)>) {
     */
 
     // set cursor
-    if let Some((x, y)) = cursor {
+    if let Some((x, y)) = editor.get_relative_cursor_pos() {
         queue!(stdout(), cursor::Show, cursor::MoveTo(x as u16, y as u16)).unwrap();
     } else {
         queue!(stdout(), cursor::Hide).unwrap();
@@ -615,7 +662,7 @@ fn terminal_main() {
     };
 
     // get the file
-    let Ok(file_content) = std::fs::read_to_string(file_path) else {
+    let Ok(file_content) = std::fs::read_to_string(&file_path) else {
         println!("Failed to open file");
         return;
     };
@@ -666,8 +713,10 @@ fn terminal_main() {
 
     // draw beforehand
     render(
-        &editor.get_buffer(width as usize, height as usize),
-        editor.get_relative_cursor_pos(),
+        &editor,
+        width as usize,
+        height as usize,
+        &file_path.to_string_lossy(),
     );
 
     // event loop
@@ -689,8 +738,10 @@ fn terminal_main() {
 
                     // render
                     render(
-                        &editor.get_buffer(width as usize, height as usize),
-                        editor.get_relative_cursor_pos(),
+                        &editor,
+                        width as usize,
+                        height as usize,
+                        &file_path.to_string_lossy(),
                     );
                 }
                 Event::Key(KeyEvent {
@@ -733,8 +784,10 @@ fn terminal_main() {
 
                     // render
                     render(
-                        &editor.get_buffer(width as usize, height as usize),
-                        editor.get_relative_cursor_pos(),
+                        &editor,
+                        width as usize,
+                        height as usize,
+                        &file_path.to_string_lossy(),
                     );
                 }
 
@@ -747,8 +800,10 @@ fn terminal_main() {
 
                     // render
                     render(
-                        &editor.get_buffer(width as usize, height as usize),
-                        editor.get_relative_cursor_pos(),
+                        &editor,
+                        width as usize,
+                        height as usize,
+                        &file_path.to_string_lossy(),
                     );
                 }
                 _ => (),
