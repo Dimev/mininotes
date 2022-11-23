@@ -85,6 +85,7 @@ fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usiz
 
 // TODO: force the rope to be 1 wide if it's not fully newlines
 // this fixes terminal layout
+// TODO: string width and char width
 fn rope_width(rope: RopeSlice) -> usize {
     rope.chars().map(|x| x.width_cjk().unwrap_or(0)).sum()
 }
@@ -474,6 +475,40 @@ impl TextEditor {
             .max(x.saturating_sub(width.saturating_sub(width_margin.min(width / 2) + 1)))
             .min(x.saturating_sub(width_margin.min(width / 2)));
     }
+    
+    /// get the number of lines
+    pub fn len_lines(&self) -> usize {
+        self.text.len_lines()
+    }
+    
+    /// get the top row that is visible
+    pub fn get_first_visible_line(&self) -> usize {
+        self.scroll_lines
+    }
+}
+
+// line numbers ==========================================
+
+/// line numbers to show
+#[derive(Copy, Clone)]
+pub struct LineNumbers {
+    /// start of the range
+    start: usize,
+    
+    /// total number of lines
+    total: usize,
+}
+
+impl LineNumbers {
+    /// get how wide this should be
+    fn width(self) -> usize {
+        format!(" {} ", self.total + 1).len()
+    }
+    
+    /// how wide the number should be
+    fn width_number(self) -> usize {
+        format!("{}", self.total + 1).len()
+    }
 }
 
 // terminal ==============================================
@@ -494,15 +529,48 @@ trait TerminalBuffer {
         let bottom = other.get_buffer(width, height - split);
         top.chars().chain(bottom.chars()).collect()
     }
+    
+    /// compose the buffer horizontally, left and right
+    fn compose_horizontal<T: TerminalBuffer>(
+        &self,
+        other: T,
+        width: usize,
+        height: usize,
+        split: usize,
+    ) -> String {
+        let left = self.get_buffer(split, height);
+        let right = self.get_buffer(width - split, height);
+        
+        // combine
+        // bit harder than vertical, as it's not possible to simply stitch them together
+        String::new()
+    }
 }
 
 impl TerminalBuffer for String {
     fn get_buffer(&self, width: usize, height: usize) -> String {
         // simply add extra padding
-        // TODO: also cut off if said padding doesn't work correctly
+        // TODO: imperative
         self.chars()
-            .chain(std::iter::repeat(' ').take(width * height - self.width_cjk()))
+            .scan(0, |acc, x| { *acc += x.width_cjk().unwrap_or(0); if *acc < width * height { Some(x) } else { None} })
+            .chain(std::iter::repeat(' ').take((width * height).saturating_sub(self.width_cjk())))
             .collect()
+    }
+}
+
+impl TerminalBuffer for LineNumbers {
+    fn get_buffer(&self, _: usize, height: usize) -> String {
+        // get the total width of the number
+        let number_padding = self.width_number();
+        
+        // iterator over the numbered lines
+        let numbered = (self.start..self.total).map(|x| format!(" {:>1$} ", x, number_padding));
+        
+        // iterator over the rest of the lines
+        let rest = std::iter::repeat(format!(" {:>1$} ", "~", number_padding));
+        
+        // collect
+        numbered.chain(rest).take(height).collect()
     }
 }
 
@@ -571,7 +639,7 @@ impl TerminalBuffer for TextEditor {
             // final padding
             buffer.extend(
                 std::iter::repeat(' ')
-                    .take((width + self.scroll_columns) - column.max(self.scroll_columns)),
+                    .take((width + self.scroll_columns).saturating_sub(column.max(self.scroll_columns))),
             );
         }
 
