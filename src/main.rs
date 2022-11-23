@@ -676,7 +676,7 @@ fn terminal_main() {
             style::ResetColor,
             cursor::MoveTo(0, terminal::size().unwrap().1),
             DisableMouseCapture,
-            cursor::Show
+            cursor::RestorePosition
         )
         .unwrap();
         terminal::disable_raw_mode().unwrap();
@@ -698,6 +698,7 @@ fn terminal_main() {
 
     execute!(
         stdout(),
+        cursor::SavePosition,
         terminal::EnterAlternateScreen,
         terminal::Clear(terminal::ClearType::Purge),
         cursor::MoveTo(0, 0),
@@ -820,7 +821,7 @@ fn terminal_main() {
         terminal::LeaveAlternateScreen,
         cursor::MoveTo(0, terminal::size().unwrap().1),
         DisableMouseCapture,
-        cursor::Show,
+        cursor::RestorePosition,
     )
     .unwrap();
     terminal::disable_raw_mode().unwrap();
