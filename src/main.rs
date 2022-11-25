@@ -475,12 +475,12 @@ impl TextEditor {
             .max(x.saturating_sub(width.saturating_sub(width_margin.min(width / 2) + 1)))
             .min(x.saturating_sub(width_margin.min(width / 2)));
     }
-    
+
     /// get the number of lines
     pub fn len_lines(&self) -> usize {
         self.text.len_lines()
     }
-    
+
     /// get the top row that is visible
     pub fn get_first_visible_line(&self) -> usize {
         self.scroll_lines
@@ -494,7 +494,7 @@ impl TextEditor {
 pub struct LineNumbers {
     /// start of the range
     start: usize,
-    
+
     /// total number of lines
     total: usize,
 }
@@ -502,12 +502,12 @@ pub struct LineNumbers {
 impl LineNumbers {
     /// get how wide this should be
     fn width(self) -> usize {
-        format!(" {} ", self.total + 1).len()
+        format!(" {} ", self.total).len()
     }
-    
+
     /// how wide the number should be
     fn width_number(self) -> usize {
-        format!("{}", self.total + 1).len()
+        format!("{}", self.total).len()
     }
 }
 
@@ -530,7 +530,7 @@ trait TerminalBuffer {
         let bottom = other.get_buffer(width, height - split);
         top.chars().chain(bottom.chars()).collect()
     }
-    
+
     /// compose the buffer horizontally, left and right
     fn compose_horizontal<T: TerminalBuffer>(
         &self,
@@ -541,32 +541,34 @@ trait TerminalBuffer {
     ) -> String {
         let left = self.get_buffer(split, height);
         let right = other.get_buffer(width - split, height);
-        
+
         let mut left_graphemes = left.graphemes(true);
         let mut right_graphemes = right.graphemes(true);
-        
+
         // current column
         let mut column = 0;
-        
+
         // string to generate
         // TODO: don't keep reallocating
         let mut buffer = String::with_capacity(left.len() + right.len());
-        
-        while let Some(grapheme) = if column < split { left_graphemes.next() } else { right_graphemes.next() } {
-            
-            
+
+        while let Some(grapheme) = if column < split {
+            left_graphemes.next()
+        } else {
+            right_graphemes.next()
+        } {
             // add to the column
             column += grapheme.width_cjk();
-            
+
             // wrap if it's on the next line
             if column >= width {
                 column -= width;
             }
-            
+
             // push it
             buffer.push_str(grapheme);
         }
-        
+
         // combine
         // bit harder than vertical, as it's not possible to simply stitch them together
         buffer
@@ -578,7 +580,14 @@ impl TerminalBuffer for String {
         // simply add extra padding
         // TODO: imperative + proper graphemes
         self.chars()
-            .scan(0, |acc, x| { *acc += x.width_cjk().unwrap_or(0); if *acc < width * height { Some(x) } else { None} })
+            .scan(0, |acc, x| {
+                *acc += x.width_cjk().unwrap_or(0);
+                if *acc < width * height {
+                    Some(x)
+                } else {
+                    None
+                }
+            })
             .chain(std::iter::repeat(' ').take((width * height).saturating_sub(self.width_cjk())))
             .collect()
     }
@@ -588,19 +597,19 @@ impl TerminalBuffer for LineNumbers {
     fn get_buffer(&self, _: usize, height: usize) -> String {
         // get the total width of the number
         let number_padding = self.width_number();
-        
+
         // iterator over the numbered lines
-        let numbered = (self.start..self.total).map(|x| format!(" {:>1$} ", x, number_padding));
-        
+        let numbered = (self.start + 1..self.total + 1).map(|x| format!(" {:>1$} ", x, number_padding));
+
         // iterator over the rest of the lines
         let rest = std::iter::repeat(format!(" {:>1$} ", "~", number_padding));
-        
+
         // collect
         numbered.chain(rest).take(height).collect()
     }
 }
 
-impl TerminalBuffer for TextEditor {
+impl TerminalBuffer for &TextEditor {
     /// get the currently visible buffer, as a list of lines
     /// this is assuming a terminal editor, and should not be used when doing a gui editor
     // TODO: compose: this uses  the calculated char position to select from either string
@@ -663,10 +672,9 @@ impl TerminalBuffer for TextEditor {
             }
 
             // final padding
-            buffer.extend(
-                std::iter::repeat(' ')
-                    .take((width + self.scroll_columns).saturating_sub(column.max(self.scroll_columns))),
-            );
+            buffer.extend(std::iter::repeat(' ').take(
+                (width + self.scroll_columns).saturating_sub(column.max(self.scroll_columns)),
+            ));
         }
 
         buffer
@@ -680,19 +688,24 @@ impl TerminalBuffer for TextEditor {
 
 /// render to the terminal, with differencing to not redraw the whole screen
 fn render(editor: &TextEditor, width: usize, height: usize, filename: &str) {
-    let lines = LineNumbers { start: editor.get_first_visible_line(), total: editor.len_lines() };
-    
-    let buffer = lines.compose_horizontal(editor.compose_vertical(
-        format!(
-            " {} {}:{}",
-            filename,
-            editor.get_row_and_column().0 + 1,
-            editor.get_row_and_column().1 + 1
-        ),
-        width.saturating_sub(lines.width()),
-        height,
-        height.saturating_sub(1)), width, height, lines.width(),
-    );
+    let lines = LineNumbers {
+        start: editor.get_first_visible_line(),
+        total: editor.len_lines(),
+    };
+
+    let buffer = lines
+        .compose_horizontal(editor, width, height.saturating_sub(1), lines.width())
+        .compose_vertical(
+            format!(
+                " {} {}:{}",
+                filename,
+                editor.get_row_and_column().0 + 1,
+                editor.get_row_and_column().1 + 1
+            ),
+            width,
+            height,
+            height.saturating_sub(1),
+        );
 
     // print editor
     queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
@@ -741,7 +754,12 @@ fn render(editor: &TextEditor, width: usize, height: usize, filename: &str) {
 
     // set cursor
     if let Some((x, y)) = editor.get_relative_cursor_pos() {
-        queue!(stdout(), cursor::Show, cursor::MoveTo((x + lines.width()) as u16, y as u16)).unwrap();
+        queue!(
+            stdout(),
+            cursor::Show,
+            cursor::MoveTo((x + lines.width()) as u16, y as u16)
+        )
+        .unwrap();
     } else {
         queue!(stdout(), cursor::Hide).unwrap();
     };
