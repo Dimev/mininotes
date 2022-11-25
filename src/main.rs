@@ -513,6 +513,7 @@ impl LineNumbers {
 
 // terminal ==============================================
 
+// TODO: better layout functionality
 /// terminal rendering trait
 trait TerminalBuffer {
     fn get_buffer(&self, width: usize, height: usize) -> String;
@@ -539,18 +540,43 @@ trait TerminalBuffer {
         split: usize,
     ) -> String {
         let left = self.get_buffer(split, height);
-        let right = self.get_buffer(width - split, height);
+        let right = other.get_buffer(width - split, height);
+        
+        let mut left_graphemes = left.graphemes(true);
+        let mut right_graphemes = right.graphemes(true);
+        
+        // current column
+        let mut column = 0;
+        
+        // string to generate
+        // TODO: don't keep reallocating
+        let mut buffer = String::with_capacity(left.len() + right.len());
+        
+        while let Some(grapheme) = if column < split { left_graphemes.next() } else { right_graphemes.next() } {
+            
+            
+            // add to the column
+            column += grapheme.width_cjk();
+            
+            // wrap if it's on the next line
+            if column >= width {
+                column -= width;
+            }
+            
+            // push it
+            buffer.push_str(grapheme);
+        }
         
         // combine
         // bit harder than vertical, as it's not possible to simply stitch them together
-        String::new()
+        buffer
     }
 }
 
 impl TerminalBuffer for String {
     fn get_buffer(&self, width: usize, height: usize) -> String {
         // simply add extra padding
-        // TODO: imperative
+        // TODO: imperative + proper graphemes
         self.chars()
             .scan(0, |acc, x| { *acc += x.width_cjk().unwrap_or(0); if *acc < width * height { Some(x) } else { None} })
             .chain(std::iter::repeat(' ').take((width * height).saturating_sub(self.width_cjk())))
@@ -654,16 +680,18 @@ impl TerminalBuffer for TextEditor {
 
 /// render to the terminal, with differencing to not redraw the whole screen
 fn render(editor: &TextEditor, width: usize, height: usize, filename: &str) {
-    let buffer = editor.compose_vertical(
+    let lines = LineNumbers { start: editor.get_first_visible_line(), total: editor.len_lines() };
+    
+    let buffer = lines.compose_horizontal(editor.compose_vertical(
         format!(
             " {} {}:{}",
             filename,
             editor.get_row_and_column().0 + 1,
             editor.get_row_and_column().1 + 1
         ),
-        width,
+        width.saturating_sub(lines.width()),
         height,
-        height.saturating_sub(1),
+        height.saturating_sub(1)), width, height, lines.width(),
     );
 
     // print editor
@@ -713,7 +741,7 @@ fn render(editor: &TextEditor, width: usize, height: usize, filename: &str) {
 
     // set cursor
     if let Some((x, y)) = editor.get_relative_cursor_pos() {
-        queue!(stdout(), cursor::Show, cursor::MoveTo(x as u16, y as u16)).unwrap();
+        queue!(stdout(), cursor::Show, cursor::MoveTo((x + lines.width()) as u16, y as u16)).unwrap();
     } else {
         queue!(stdout(), cursor::Hide).unwrap();
     };
