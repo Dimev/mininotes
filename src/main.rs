@@ -8,9 +8,9 @@ use crossterm::{
     execute, queue, style, terminal,
 };
 
+use std::ffi::OsString;
 use std::io::{stdout, Write};
 use std::ops::Range;
-use std::ffi::OsString;
 
 // editor deps
 use ropey::{Rope, RopeSlice};
@@ -87,9 +87,11 @@ fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usiz
 
 // TODO: force the rope to be 1 wide if it's not fully newlines
 // this fixes terminal layout
-// TODO: string width and char width
-fn rope_width(rope: RopeSlice) -> usize {
-    rope.chars().map(|x| x.width_cjk().unwrap_or(0)).sum()
+fn rope_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
+    iterator
+        .into_iter()
+        .map(|x| x.width_cjk().unwrap_or(0))
+        .sum()
 }
 
 // TODO: all newlines
@@ -170,7 +172,7 @@ impl<'a> Iterator for TermLineLayout<'a> {
 
             // figure out the width
             // newlines are control characters, so they will have 0 width
-            let grapheme_width = rope_width(rope_slice);
+            let grapheme_width = rope_width(rope_slice.chars());
 
             // make the found grapheme
             let grapheme = GraphemePosition {
@@ -217,7 +219,7 @@ pub struct TextEditor<L: LineLayout> {
 
     /// line layout settings
     layout_settings: L,
-    
+
     /// selection, byte range
     selection: Option<Range<usize>>,
 }
@@ -554,32 +556,136 @@ impl LineNumbers {
 // so it would look like
 // lines.left_of(editor, SplitModeVert::FullLeft).top_of(status_line, SplitModeHor::FullBottom).compose(width, height)
 /// terminal rendering trait
-trait TerminalBuffer {
+trait TerminalBuffer: Sized {
+    /// Get the buffer of this size
+    /// This has to guarantee the buffer is of this exact size
     fn get_buffer(&self, width: usize, height: usize) -> String;
 
-    /// compose the buffer vertically, top and bottom
-    fn compose_vertical<T: TerminalBuffer>(
-        &self,
-        other: T,
-        width: usize,
-        height: usize,
-        split: usize,
-    ) -> String {
-        let top = self.get_buffer(width, split);
-        let bottom = other.get_buffer(width, height - split);
-        top.chars().chain(bottom.chars()).collect()
+    /// Compose a buffer to the other side
+    fn left_of<'a, T: TerminalBuffer>(
+        &'a self,
+        other: &'a T,
+        mode: SplitMode,
+    ) -> VerticalPane<'a, Self, T> {
+        VerticalPane {
+            left: self,
+            right: other,
+            mode,
+        }
     }
 
-    /// compose the buffer horizontally, left and right
-    fn compose_horizontal<T: TerminalBuffer>(
-        &self,
-        other: T,
-        width: usize,
-        height: usize,
-        split: usize,
-    ) -> String {
-        let left = self.get_buffer(split, height);
-        let right = other.get_buffer(width - split, height);
+    /// Compose a buffer to the other side
+    fn right_of<'a, T: TerminalBuffer>(
+        &'a self,
+        other: &'a T,
+        mode: SplitMode,
+    ) -> VerticalPane<'a, T, Self> {
+        VerticalPane {
+            left: other,
+            right: self,
+            mode: mode.reverse(),
+        }
+    }
+
+    /// Compose a buffer to the other side
+    fn top_of<'a, T: TerminalBuffer>(
+        &'a self,
+        other: &'a T,
+        mode: SplitMode,
+    ) -> HorizontalPane<'a, Self, T> {
+        HorizontalPane {
+            top: self,
+            bottom: other,
+            mode,
+        }
+    }
+
+    /// Compose a buffer to the other side
+    fn bottom_of<'a, T: TerminalBuffer>(
+        &'a self,
+        other: &'a T,
+        mode: SplitMode,
+    ) -> HorizontalPane<'a, T, Self> {
+        HorizontalPane {
+            top: other,
+            bottom: self,
+            mode: mode.reverse(),
+        }
+    }
+}
+
+/// mode on how to treat split layout
+#[derive(Copy, Clone)]
+enum SplitMode {
+    // TODO: inferred left and right
+    // this uses the preferred with and height, if any, otherwise split by half
+    // TODO: left or right only, to (not) show things when not needed
+    /// Show based on a split ratio, 0-1
+    Ratio(f32),
+
+    /// Guarantee the left side is at most this wide, when possible
+    ExactLeft(usize),
+
+    /// Guarantee the right side is at most this wide, when possible
+    ExactRight(usize),
+}
+
+impl SplitMode {
+    fn reverse(self) -> Self {
+        match self {
+            Self::Ratio(x) => Self::Ratio(1.0 - x),
+            Self::ExactLeft(x) => Self::ExactRight(x),
+            Self::ExactRight(x) => Self::ExactLeft(x),
+        }
+    }
+}
+
+/// pane split top and bottom
+#[derive(Copy, Clone)]
+struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
+    top: &'a L,
+    bottom: &'a R,
+    mode: SplitMode,
+}
+
+impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane<'a, L, R> {
+    fn get_buffer(&self, width: usize, height: usize) -> String {
+        // figure out the correct split
+        let split = match self.mode {
+            SplitMode::Ratio(x) => (height as f32 * x) as usize,
+            SplitMode::ExactLeft(x) => x.min(height),
+            SplitMode::ExactRight(x) => height.saturating_sub(x),
+        };
+
+        // get the buffers of the right size
+        let top = self.top.get_buffer(width, split);
+        let bottom = self.bottom.get_buffer(width, height - split);
+
+        // and just stitch them together
+        top.chars().chain(bottom.chars()).collect()
+    }
+}
+
+/// pane split left and right
+#[derive(Copy, Clone)]
+struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
+    left: &'a L,
+    right: &'a R,
+    mode: SplitMode,
+}
+
+impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'a, L, R> {
+    fn get_buffer(&self, width: usize, height: usize) -> String {
+        // figure out the correct split
+        let split = match self.mode {
+            SplitMode::Ratio(x) => (width as f32 * x) as usize,
+            SplitMode::ExactLeft(x) => x.min(width),
+            SplitMode::ExactRight(x) => width.saturating_sub(x),
+        };
+
+        // get the buffers
+        let left = self.left.get_buffer(split, height);
+        let right = self.right.get_buffer(width - split, height);
 
         let mut left_graphemes = left.graphemes(true);
         let mut right_graphemes = right.graphemes(true);
@@ -588,9 +694,9 @@ trait TerminalBuffer {
         let mut column = 0;
 
         // string to generate
-        // TODO: don't keep reallocating
         let mut buffer = String::with_capacity(left.len() + right.len());
 
+        // and add the lines together
         while let Some(grapheme) = if column < split {
             left_graphemes.next()
         } else {
@@ -608,8 +714,6 @@ trait TerminalBuffer {
             buffer.push_str(grapheme);
         }
 
-        // combine
-        // bit harder than vertical, as it's not possible to simply stitch them together
         buffer
     }
 }
@@ -633,7 +737,10 @@ impl TerminalBuffer for String {
 }
 
 impl TerminalBuffer for LineNumbers {
-    fn get_buffer(&self, _: usize, height: usize) -> String {
+    fn get_buffer(&self, width: usize, height: usize) -> String {
+        // TODO: width/height guarantees
+        assert!(width >= self.width(), "TODO: uphold width guarantee");
+
         // get the total width of the number
         let number_padding = self.width_number();
 
@@ -652,7 +759,6 @@ impl TerminalBuffer for LineNumbers {
 impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
     /// get the currently visible buffer, as a list of lines
     /// this is assuming a terminal editor, and should not be used when doing a gui editor
-    // TODO: compose: this uses  the calculated char position to select from either string
     fn get_buffer(&self, width: usize, height: usize) -> String {
         // all found text lines
         let mut buffer = String::new();
@@ -681,7 +787,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
                     }
 
                     // get the grapheme width
-                    let grapheme_width = rope_width(grapheme);
+                    let grapheme_width = rope_width(grapheme.chars());
 
                     // if it doesn't fit in the buffer, pad spaces
                     if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
@@ -738,18 +844,17 @@ fn render(
     };
 
     let buffer = lines
-        .compose_horizontal(editor, width, height.saturating_sub(1), lines.width())
-        .compose_vertical(
-            format!(
+        .left_of(&editor, SplitMode::ExactLeft(lines.width()))
+        .top_of(
+            &format!(
                 " {} {}:{}",
                 filename,
                 editor.get_row_and_column().0 + 1,
                 editor.get_row_and_column().1 + 1
             ),
-            width,
-            height,
-            height.saturating_sub(1),
-        );
+            SplitMode::ExactRight(1),
+        )
+        .get_buffer(width, height);
 
     // print editor
     queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
@@ -992,22 +1097,25 @@ fn gui_main(file_path: OsString) {
 enum Argument {
     GuiMode,
     FilePath(OsString),
-    Unknown,    
+    Unknown,
 }
 
 /// parse all arguments
 fn parse_arguments() -> Vec<Argument> {
-    
-    std::env::args_os().skip(1).next().map(|x| Argument::FilePath(x)).into_iter().collect()
-
-} 
+    std::env::args_os()
+        .skip(1)
+        .next()
+        .map(|x| Argument::FilePath(x))
+        .into_iter()
+        .collect()
+}
 
 // run ==============================================================
 
 fn main() {
     // parse arguments
     let args = parse_arguments();
-    
+
     // get the file
     let Some(file_path) = args.into_iter().find_map(|x| if let Argument::FilePath(y) = x { Some(y) } else { None }) else {
         println!("Usage: mininotes <file>");
