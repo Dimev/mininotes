@@ -9,6 +9,8 @@ use crossterm::{
 };
 
 use std::io::{stdout, Write};
+use std::ops::Range;
+use std::ffi::OsString;
 
 // editor deps
 use ropey::{Rope, RopeSlice};
@@ -95,7 +97,14 @@ fn is_newline(c: char) -> bool {
     c == '\n'
 }
 
-// terminal layout ===========================================
+// general layout ===========================================
+
+pub trait LineLayout {
+    type Iter<'a>: Iterator<Item = GraphemePosition>;
+
+    /// Layout a line
+    fn layout_line<'a>(&self, line: RopeSlice<'a>) -> Self::Iter<'a>;
+}
 
 /// grapheme information
 pub struct GraphemePosition {
@@ -109,9 +118,22 @@ pub struct GraphemePosition {
     pub cursor: usize,
 }
 
+// terminal layout ===========================================
+
+/// Layout settings, which there are none of
+// TODO: bidir
+pub struct TermLineLayoutSettings {}
+
+impl LineLayout for TermLineLayoutSettings {
+    type Iter<'a> = TermLineLayout<'a>;
+
+    fn layout_line<'a>(&self, line: RopeSlice<'a>) -> TermLineLayout<'a> {
+        TermLineLayout::new(line)
+    }
+}
+
 /// iterator state
 pub struct TermLineLayout<'a> {
-    // TODO: generic text layout algo
     /// line
     line: RopeSlice<'a>,
 
@@ -170,15 +192,14 @@ impl<'a> Iterator for TermLineLayout<'a> {
 }
 
 // TODO: helix style grapheme width to fix it breaking on missing font terminals -> seems to just force the cursor to move to the right position
+// TODO: or kakoune, as that seems to do it perfectly
 
 // editor ====================================================
 
 /// multiline text editor
 // TODO: const generics (?) to also make it work as a single line editor
 // this disables the multi-line editing features, and fails to create when the input text has newlines in it
-// TODO: seperate scroll state
-// TODO: correct generic line layout iterator
-pub struct TextEditor {
+pub struct TextEditor<L: LineLayout> {
     /// text
     text: Rope,
 
@@ -193,16 +214,24 @@ pub struct TextEditor {
 
     /// scrolled columns
     scroll_columns: usize,
+
+    /// line layout settings
+    layout_settings: L,
+    
+    /// selection, byte range
+    selection: Option<Range<usize>>,
 }
 
-impl TextEditor {
-    pub fn new(content: &str) -> Self {
+impl<L: LineLayout> TextEditor<L> {
+    pub fn new(content: &str, layout_settings: L) -> Self {
         Self {
             text: Rope::from_str(content),
             cursor: 0,
             target_column: 0,
             scroll_lines: 0,
             scroll_columns: 0,
+            layout_settings,
+            selection: None,
         }
     }
 
@@ -323,10 +352,14 @@ impl TextEditor {
         let line = self.text.line(self.text.byte_to_line(self.cursor));
 
         // layout the line, and find the right grapheme that contains our column, or at least the one closest to it
-        if let Some(cursor) = TermLineLayout::new(line)
+        let cursor_pos = self
+            .layout_settings
+            .layout_line(line)
             .find(|x| (x.start_column..x.end_column).contains(&column))
-            .map(|x| self.cursor + x.cursor)
-        {
+            .map(|x| self.cursor + x.cursor);
+
+        // need to do this here, otherwise the borrowchecker can't see we don't need to borrow self in line when doing move_cursor
+        if let Some(cursor) = cursor_pos {
             self.cursor = cursor;
         } else {
             // otherwise, move it to the end of the line, as that would be expected
@@ -377,7 +410,8 @@ impl TextEditor {
 
         // find the column
         // not using find directly here, as that may not properly find the end of the string
-        TermLineLayout::new(line)
+        self.layout_settings
+            .layout_line(line)
             .take_while(|x| x.cursor + line_start < self.cursor)
             .last()
             .map(|x| x.end_column)
@@ -513,7 +547,12 @@ impl LineNumbers {
 
 // terminal ==============================================
 
+// TODO: syntax highlighting here
+
 // TODO: better layout functionality
+// compose should work with a split struct and a way to automatically compose the entire thing
+// so it would look like
+// lines.left_of(editor, SplitModeVert::FullLeft).top_of(status_line, SplitModeHor::FullBottom).compose(width, height)
 /// terminal rendering trait
 trait TerminalBuffer {
     fn get_buffer(&self, width: usize, height: usize) -> String;
@@ -578,17 +617,17 @@ trait TerminalBuffer {
 impl TerminalBuffer for String {
     fn get_buffer(&self, width: usize, height: usize) -> String {
         // simply add extra padding
-        // TODO: imperative + proper graphemes
+        // TODO: wrapping?
         self.chars()
+            .chain(std::iter::repeat(' '))
             .scan(0, |acc, x| {
                 *acc += x.width_cjk().unwrap_or(0);
-                if *acc < width * height {
+                if *acc <= width * height {
                     Some(x)
                 } else {
                     None
                 }
             })
-            .chain(std::iter::repeat(' ').take((width * height).saturating_sub(self.width_cjk())))
             .collect()
     }
 }
@@ -599,7 +638,8 @@ impl TerminalBuffer for LineNumbers {
         let number_padding = self.width_number();
 
         // iterator over the numbered lines
-        let numbered = (self.start + 1..self.total + 1).map(|x| format!(" {:>1$} ", x, number_padding));
+        let numbered =
+            (self.start + 1..self.total + 1).map(|x| format!(" {:>1$} ", x, number_padding));
 
         // iterator over the rest of the lines
         let rest = std::iter::repeat(format!(" {:>1$} ", "~", number_padding));
@@ -609,7 +649,7 @@ impl TerminalBuffer for LineNumbers {
     }
 }
 
-impl TerminalBuffer for &TextEditor {
+impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
     /// get the currently visible buffer, as a list of lines
     /// this is assuming a terminal editor, and should not be used when doing a gui editor
     // TODO: compose: this uses  the calculated char position to select from either string
@@ -644,8 +684,7 @@ impl TerminalBuffer for &TextEditor {
                     let grapheme_width = rope_width(grapheme);
 
                     // if it doesn't fit in the buffer, pad spaces
-                    if column < self.scroll_columns
-                        && column + grapheme_width >= self.scroll_columns
+                    if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
                     {
                         buffer.extend(
                             std::iter::repeat(' ')
@@ -653,14 +692,14 @@ impl TerminalBuffer for &TextEditor {
                         );
 
                     // if we exceed the line, pad spaces instead
-                    } else if column + grapheme_width >= self.scroll_columns + width {
+                    } else if column + grapheme_width > self.scroll_columns + width {
                         buffer.extend(
                             std::iter::repeat(' ').take(self.scroll_columns + width - column),
                         );
 
                     // otherwise, add our characters
                     } else if column >= self.scroll_columns
-                        && column + grapheme_width < self.scroll_columns + width
+                        && column + grapheme_width <= self.scroll_columns + width
                     {
                         buffer.extend(grapheme.chars());
                     }
@@ -687,7 +726,12 @@ impl TerminalBuffer for &TextEditor {
 // should be simpler due to dealing with strings, and not iterators, although less efficient
 
 /// render to the terminal, with differencing to not redraw the whole screen
-fn render(editor: &TextEditor, width: usize, height: usize, filename: &str) {
+fn render(
+    editor: &TextEditor<TermLineLayoutSettings>,
+    width: usize,
+    height: usize,
+    filename: &str,
+) {
     let lines = LineNumbers {
         start: editor.get_first_visible_line(),
         total: editor.len_lines(),
@@ -768,13 +812,7 @@ fn render(editor: &TextEditor, width: usize, height: usize, filename: &str) {
     stdout().flush().unwrap();
 }
 
-fn terminal_main() {
-    // get the file
-    let Some(file_path) = std::env::args_os().skip(1).next() else {
-        println!("Usage: mininotes <file>");
-        return;
-    };
-
+fn terminal_main(file_path: OsString) {
     // get the file
     let Ok(file_content) = std::fs::read_to_string(&file_path) else {
         println!("Failed to open file");
@@ -824,7 +862,7 @@ fn terminal_main() {
     let (mut width, mut height) = terminal::size().unwrap();
 
     // editor
-    let mut editor = TextEditor::new(&file_content);
+    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {});
 
     // draw beforehand
     render(
@@ -895,6 +933,7 @@ fn terminal_main() {
                     }
 
                     // fix scrolling before rendering
+                    // TODO: fix in render step
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
@@ -944,12 +983,36 @@ fn terminal_main() {
 }
 
 // gui ===============================================================
-fn gui_main() {
-    todo!()
+fn gui_main(file_path: OsString) {
+    todo!("Not done yet!")
 }
 
-fn main() {
-    // TODO: cmd args
+// arg parsing ======================================================
 
-    terminal_main();
+enum Argument {
+    GuiMode,
+    FilePath(OsString),
+    Unknown,    
+}
+
+/// parse all arguments
+fn parse_arguments() -> Vec<Argument> {
+    
+    std::env::args_os().skip(1).next().map(|x| Argument::FilePath(x)).into_iter().collect()
+
+} 
+
+// run ==============================================================
+
+fn main() {
+    // parse arguments
+    let args = parse_arguments();
+    
+    // get the file
+    let Some(file_path) = args.into_iter().find_map(|x| if let Argument::FilePath(y) = x { Some(y) } else { None }) else {
+        println!("Usage: mininotes <file>");
+        return;
+    };
+
+    terminal_main(file_path);
 }
