@@ -16,3 +16,8 @@ Current goals:
  - basic undo/redo/copy/paste, status bar
  - skip words navigation
  - maybe bidir
+
+# Licence
+WTFPL
+
+Does not apply on fira-code.ttf, which is instead under the open font licence 

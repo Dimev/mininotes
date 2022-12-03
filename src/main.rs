@@ -7,6 +7,7 @@ use crossterm::{
     },
     execute, queue, style, terminal,
 };
+use swash::FontRef;
 
 use std::ffi::OsString;
 use std::io::{stdout, Write};
@@ -16,6 +17,12 @@ use std::ops::Range;
 use ropey::{Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+// gui deps
+use minifb::{Window, WindowOptions};
+
+// arg parsing
+use clap::Parser;
 
 // unicode tools =============================================
 
@@ -192,6 +199,8 @@ impl<'a> Iterator for TermLineLayout<'a> {
         }
     }
 }
+
+// layout for gui ============================================
 
 // TODO: helix style grapheme width to fix it breaking on missing font terminals -> seems to just force the cursor to move to the right position
 // TODO: or kakoune, as that seems to do it perfectly
@@ -525,6 +534,7 @@ impl<L: LineLayout> TextEditor<L> {
 
 // line numbers ==========================================
 
+// TODO: relative line numbers
 /// line numbers to show
 #[derive(Copy, Clone)]
 pub struct LineNumbers {
@@ -547,14 +557,19 @@ impl LineNumbers {
     }
 }
 
+// TODO: string rendering ===============================
+// at least, seperately for the buffer
+
 // terminal ==============================================
 
 // TODO: syntax highlighting here
 
 // TODO: better layout functionality
-// compose should work with a split struct and a way to automatically compose the entire thing
-// so it would look like
-// lines.left_of(editor, SplitModeVert::FullLeft).top_of(status_line, SplitModeHor::FullBottom).compose(width, height)
+// this should also work when using the gui
+// having a way to capture events here would also be nice
+// besides get_buffer, there should also be handle input, get glyphs, etc
+// as well as size hints
+
 /// terminal rendering trait
 trait TerminalBuffer: Sized {
     /// Get the buffer of this size
@@ -826,10 +841,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
     }
 }
 
-// TODO: horizontal and vertical compose, so multiple buffers can be next to eachother
-// keeps track of the width of graphemes
-// if one goes beyond the width, switch to the other iterator
-// should be simpler due to dealing with strings, and not iterators, although less efficient
+// TODO: split into getting the buffer and actual terminal rendering
 
 /// render to the terminal, with differencing to not redraw the whole screen
 fn render(
@@ -1107,38 +1119,74 @@ fn terminal_main(file_path: OsString) {
 
 // gui ===============================================================
 fn gui_main(file_path: OsString) {
-    todo!("Not done yet!")
+    // get the file
+    let Ok(file_content) = std::fs::read_to_string(&file_path) else {
+        println!("Failed to open file");
+        return;
+    };
+
+    // make a font
+    let font_data = include_bytes!("fira-code.ttf");
+    let font = FontRef::from_index(font_data, 0).unwrap();
+
+    // make the font shaper
+
+    // make the font scaler
+
+    // make the font layout settings
+
+    // make the editor
+    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {});
+
+    // start the  window
+    let mut window = Window::new(
+        "mininotes",
+        800,
+        450,
+        WindowOptions {
+            borderless: false,
+            resize: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    while window.is_open() {
+        // update editor
+    
+        // get all glyphs that need to be laid out
+    
+        // draw all glyphs to the right position
+    
+        // and update
+    
+        // update!
+        window.update();
+    }
 }
 
 // arg parsing ======================================================
 
-enum Argument {
-    GuiMode,
-    FilePath(OsString),
-    Unknown,
-}
+#[derive(Parser)]
+struct Args {
+    #[arg()]
+    /// file to edit
+    file_path: OsString,
 
-/// parse all arguments
-fn parse_arguments() -> Vec<Argument> {
-    std::env::args_os()
-        .skip(1)
-        .next()
-        .map(|x| Argument::FilePath(x))
-        .into_iter()
-        .collect()
+    /// whether to run in gui mode
+    #[arg(long, short)]
+    gui: bool,
 }
 
 // run ==============================================================
 
 fn main() {
     // parse arguments
-    let args = parse_arguments();
+    let args = Args::parse();
 
-    // get the file
-    let Some(file_path) = args.into_iter().find_map(|x| if let Argument::FilePath(y) = x { Some(y) } else { None }) else {
-        println!("Usage: mininotes <file>");
-        return;
+    if args.gui {
+        gui_main(args.file_path)
+    } else {
+        terminal_main(args.file_path)
     };
-
-    terminal_main(file_path);
 }
