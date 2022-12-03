@@ -761,7 +761,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
     /// this is assuming a terminal editor, and should not be used when doing a gui editor
     fn get_buffer(&self, width: usize, height: usize) -> String {
         // all found text lines
-        let mut buffer = String::new();
+        let mut buffer = String::with_capacity(width * height);
 
         // go over all lines in the buffer
         for line_num in self.scroll_lines..self.scroll_lines + height {
@@ -864,15 +864,32 @@ fn render(
     let mut x = 0;
     let mut y = 0;
 
+    // position of the other item in the buffer
+    let mut prev_x = 0;
+    let mut prev_y = 0;
+
+    // previous buffer chars
+    let mut prev_chars = previous_buffer.chars();
+
     // and draw, char per char to ensure the correct cursor position
     for c in buffer.chars() {
-        // draw
-        queue!(
-            stdout(),
-            cursor::MoveTo(x as u16, y as u16),
-            style::Print(c)
-        )
-        .unwrap();
+        // if y is the same and prev x is smaller or prev y is smaller, fetch the next char from the prev buffer, and update the position, if any
+        let prev_char = if true || (y == prev_y && prev_x < x) || prev_y < y {
+            // fetch
+            prev_chars.next()
+        } else {
+            None
+        };
+
+        // don't draw if the positions are the same, and the character is as well
+        if x != prev_x || y != prev_y || Some(c) != prev_char {
+            queue!(
+                stdout(),
+                cursor::MoveTo(x as u16, y as u16),
+                style::Print(c)
+            )
+            .unwrap();
+        }
 
         // calculate the new cursor position
         x += string_width(std::iter::once(c));
@@ -881,6 +898,17 @@ fn render(
         if x >= width {
             y += 1;
             x = 0;
+        }
+
+        // update position of the prev char
+        if let Some(prev_c) = prev_char {
+            prev_x += string_width(std::iter::once(prev_c));
+
+            // and wrap
+            if prev_x >= width {
+                prev_y += 1;
+                prev_x = 0;
+            }
         }
     }
 
@@ -901,51 +929,6 @@ fn render(
 
     // and return the current buffer
     buffer
-
-    // print editor
-    //queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
-
-    // TODO: diff
-    // check the graphemes of both
-    // if one grapheme is different than the other, force emit set cursor pos and then the difference
-    // different means their positions are different or their content is different
-
-    // iterate over all characters and keep track of their column and row
-    // if the column exceeds the width, go to the next row
-    // then zip with the previous buffer and filter out the ones that changed
-    // then do this
-    /*let mut diff = Vec::new();
-
-        // previous x value
-        let mut prev_x = 0;
-        let mut prev_y = 0;
-
-        // get the changes
-        let changes = self.get_changed_cells();
-
-        // actually move to 0, 0, if there's any changes
-        if changes.len() > 0 {
-            diff.push(CharOrJump::Jump(0, 0));
-        }
-
-        // go over all items, loop wise
-        for (x, y, change) in changes {
-            // if we're not where the pointer would have advanced to
-            // move to where we should be
-            if prev_x + 1 != x || prev_y != y || prev_x == 0 {
-                diff.push(CharOrJump::Jump(x, y));
-            }
-
-            // emit the change
-            diff.push(CharOrJump::Char(change));
-
-            // remember x
-            prev_x = x;
-            prev_y = y;
-        }
-
-        diff
-    */
 }
 
 fn terminal_main(file_path: OsString) {
