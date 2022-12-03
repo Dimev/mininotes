@@ -87,7 +87,7 @@ fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usiz
 
 // TODO: force the rope to be 1 wide if it's not fully newlines
 // this fixes terminal layout
-fn rope_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
+fn string_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
     iterator
         .into_iter()
         .map(|x| x.width_cjk().unwrap_or(0))
@@ -172,7 +172,7 @@ impl<'a> Iterator for TermLineLayout<'a> {
 
             // figure out the width
             // newlines are control characters, so they will have 0 width
-            let grapheme_width = rope_width(rope_slice.chars());
+            let grapheme_width = string_width(rope_slice.chars());
 
             // make the found grapheme
             let grapheme = GraphemePosition {
@@ -787,7 +787,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
                     }
 
                     // get the grapheme width
-                    let grapheme_width = rope_width(grapheme.chars());
+                    let grapheme_width = string_width(grapheme.chars());
 
                     // if it doesn't fit in the buffer, pad spaces
                     if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
@@ -837,7 +837,8 @@ fn render(
     width: usize,
     height: usize,
     filename: &str,
-) {
+    previous_buffer: &str,
+) -> String {
     let lines = LineNumbers {
         start: editor.get_first_visible_line(),
         total: editor.len_lines(),
@@ -856,8 +857,53 @@ fn render(
         )
         .get_buffer(width, height);
 
+    // hide the cursor to prevent flicker
+    queue!(stdout(), cursor::Hide).unwrap();
+
+    // current position in the buffer
+    let mut x = 0;
+    let mut y = 0;
+
+    // and draw, char per char to ensure the correct cursor position
+    for c in buffer.chars() {
+        // draw
+        queue!(
+            stdout(),
+            cursor::MoveTo(x as u16, y as u16),
+            style::Print(c)
+        )
+        .unwrap();
+
+        // calculate the new cursor position
+        x += string_width(std::iter::once(c));
+
+        // if it's off to the side, reset
+        if x >= width {
+            y += 1;
+            x = 0;
+        }
+    }
+
+    // set cursor
+    if let Some((x, y)) = editor.get_relative_cursor_pos() {
+        queue!(
+            stdout(),
+            cursor::Show,
+            cursor::MoveTo((x + lines.width()) as u16, y as u16),
+        )
+        .unwrap();
+    } else {
+        queue!(stdout(), cursor::Hide).unwrap();
+    };
+
+    // save changes
+    stdout().flush().unwrap();
+
+    // and return the current buffer
+    buffer
+
     // print editor
-    queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
+    //queue!(stdout(), cursor::MoveTo(0, 0), style::Print(buffer),).unwrap();
 
     // TODO: diff
     // check the graphemes of both
@@ -900,21 +946,6 @@ fn render(
 
         diff
     */
-
-    // set cursor
-    if let Some((x, y)) = editor.get_relative_cursor_pos() {
-        queue!(
-            stdout(),
-            cursor::Show,
-            cursor::MoveTo((x + lines.width()) as u16, y as u16)
-        )
-        .unwrap();
-    } else {
-        queue!(stdout(), cursor::Hide).unwrap();
-    };
-
-    // save changes
-    stdout().flush().unwrap();
 }
 
 fn terminal_main(file_path: OsString) {
@@ -970,11 +1001,12 @@ fn terminal_main(file_path: OsString) {
     let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {});
 
     // draw beforehand
-    render(
+    let mut current_buffer = render(
         &editor,
         width as usize,
         height as usize,
         &file_path.to_string_lossy(),
+        "",
     );
 
     // event loop
@@ -995,11 +1027,12 @@ fn terminal_main(file_path: OsString) {
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
-                    render(
+                    current_buffer = render(
                         &editor,
                         width as usize,
                         height as usize,
                         &file_path.to_string_lossy(),
+                        &current_buffer,
                     );
                 }
                 Event::Key(KeyEvent {
@@ -1042,11 +1075,12 @@ fn terminal_main(file_path: OsString) {
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
-                    render(
+                    current_buffer = render(
                         &editor,
                         width as usize,
                         height as usize,
                         &file_path.to_string_lossy(),
+                        &current_buffer,
                     );
                 }
 
@@ -1058,11 +1092,12 @@ fn terminal_main(file_path: OsString) {
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
-                    render(
+                    current_buffer = render(
                         &editor,
                         width as usize,
                         height as usize,
                         &file_path.to_string_lossy(),
+                        "",
                     );
                 }
                 _ => (),
