@@ -5,7 +5,9 @@ use crossterm::{
         poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
         KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
-    execute, queue, style, terminal,
+    execute, queue, style,
+    style::Color,
+    terminal,
 };
 use swash::FontRef;
 
@@ -200,16 +202,9 @@ impl<'a> Iterator for TermLineLayout<'a> {
     }
 }
 
-// layout for gui ============================================
-
-// TODO: helix style grapheme width to fix it breaking on missing font terminals -> seems to just force the cursor to move to the right position
-// TODO: or kakoune, as that seems to do it perfectly
-
 // editor ====================================================
 
 /// multiline text editor
-// TODO: const generics (?) to also make it work as a single line editor
-// this disables the multi-line editing features, and fails to create when the input text has newlines in it
 pub struct TextEditor<L: LineLayout> {
     /// text
     text: Rope,
@@ -557,12 +552,50 @@ impl LineNumbers {
     }
 }
 
-// TODO: string rendering ===============================
-// at least, seperately for the buffer
-
 // terminal ==============================================
 
+/// type of highlight
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Highlight {
+    /// basic text
+    Text,
+
+    /// selected text
+    Selection,
+
+    /// the left gutter, or the line numbers for this editor
+    Gutter,
+
+    /// status bar
+    Status,
+}
+
+impl Highlight {
+    /// returns the foreground color
+    fn get_color_foreground_crossterm(self) -> Color {
+        match self {
+            Self::Text => Color::Reset,
+            Self::Selection => Color::White,
+            Self::Gutter => Color::Yellow,
+            Self::Status => Color::Black,
+        }
+    }
+
+    /// returns the background color
+    fn get_color_background_crossterm(self) -> Color {
+        match self {
+            Self::Text => Color::Reset,
+            Self::Selection => Color::Grey,
+            Self::Gutter => Color::Reset,
+            Self::Status => Color::White,
+        }
+    }
+}
+
 // TODO: syntax highlighting here
+
+// ui layout/terminal drawing ===========================
+// TODO: move this around a bit
 
 // TODO: better layout functionality
 // this should also work when using the gui
@@ -655,6 +688,8 @@ impl SplitMode {
     }
 }
 
+// TODO: mutable splits, as well as the ability to get the cursor position, run functions etc
+
 /// pane split top and bottom
 #[derive(Copy, Clone)]
 struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
@@ -733,11 +768,22 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'
     }
 }
 
-impl TerminalBuffer for String {
+struct TextLine<'a> {
+    string: &'a str,
+}
+
+impl<'a> TextLine<'a> {
+    fn new(string: &'a str) -> Self {
+        Self { string }
+    }
+}
+
+impl<'a> TerminalBuffer for TextLine<'a> {
     fn get_buffer(&self, width: usize, height: usize) -> String {
         // simply add extra padding
         // TODO: wrapping?
-        self.chars()
+        self.string
+            .chars()
             .chain(std::iter::repeat(' '))
             .scan(0, |acc, x| {
                 *acc += x.width_cjk().unwrap_or(0);
@@ -841,34 +887,47 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
     }
 }
 
-// TODO: split into getting the buffer and actual terminal rendering
-
-/// render to the terminal, with differencing to not redraw the whole screen
-fn render(
+/// render the editor to a buffer
+fn render_editor_to_buffer(
     editor: &TextEditor<TermLineLayoutSettings>,
     width: usize,
     height: usize,
     filename: &str,
-    previous_buffer: &str,
-) -> String {
+) -> (String, Option<(usize, usize)>) {
     let lines = LineNumbers {
         start: editor.get_first_visible_line(),
         total: editor.len_lines(),
     };
 
-    let buffer = lines
-        .left_of(&editor, SplitMode::ExactLeft(lines.width()))
-        .top_of(
-            &format!(
-                " {} {}:{}",
-                filename,
-                editor.get_row_and_column().0 + 1,
-                editor.get_row_and_column().1 + 1
-            ),
-            SplitMode::ExactRight(1),
-        )
-        .get_buffer(width, height);
- 
+    let status_line = format!(
+        " {} {}:{}",
+        filename,
+        editor.get_row_and_column().0 + 1,
+        editor.get_row_and_column().1 + 1
+    );
+
+    // cursor position
+    let cursor_pos = editor
+        .get_relative_cursor_pos()
+        .map(|(x, y)| (x + lines.width(), y));
+
+    // and simply perform layout
+    (
+        lines
+            .left_of(&editor, SplitMode::ExactLeft(lines.width()))
+            .top_of(&TextLine::new(&status_line), SplitMode::ExactRight(1))
+            .get_buffer(width, height),
+        cursor_pos,
+    )
+}
+
+/// render to the terminal, with differencing to not redraw the whole screen
+fn render(
+    width: usize,
+    cursor_position: Option<(usize, usize)>,
+    buffer: &str,
+    previous_buffer: &str,
+) {
     // current position in the buffer
     let mut x = 0;
     let mut y = 0;
@@ -882,7 +941,7 @@ fn render(
 
     // whether to force move to the position
     let mut force_move = true;
-    
+
     // and draw, char per char to ensure the correct cursor position
     for c in buffer.chars() {
         // don't draw if the positions are the same, and the character is as well
@@ -891,14 +950,10 @@ fn render(
             if force_move {
                 queue!(stdout(), cursor::MoveTo(x as u16, y as u16)).unwrap();
             }
-            
+
             // print as normal
-            queue!(
-                stdout(),
-                style::Print(c)
-            )
-            .unwrap();
-            
+            queue!(stdout(), style::Print(c)).unwrap();
+
             // we moved, so this can be false because our position is known
             // however, it may have changed if our character is not an ascii char (which has a known width)
             force_move = !c.is_ascii() || c.is_ascii_control();
@@ -914,7 +969,7 @@ fn render(
         if x >= width {
             y += 1;
             x = 0;
-            
+
             // moved to a new line, so do this to be sure
             force_move = true;
         }
@@ -924,7 +979,7 @@ fn render(
             if let Some(c) = prev_chars.next() {
                 // update the position
                 prev_x += string_width(std::iter::once(c));
-                
+
                 // and wrap
                 if prev_x >= width {
                     prev_y += 1;
@@ -938,22 +993,14 @@ fn render(
     }
 
     // set cursor
-    if let Some((x, y)) = editor.get_relative_cursor_pos() {
-        queue!(
-            stdout(),
-            cursor::Show,
-            cursor::MoveTo((x + lines.width()) as u16, y as u16),
-        )
-        .unwrap();
+    if let Some((x, y)) = cursor_position {
+        queue!(stdout(), cursor::Show, cursor::MoveTo(x as u16, y as u16),).unwrap();
     } else {
         queue!(stdout(), cursor::Hide).unwrap();
     };
 
     // save changes
     stdout().flush().unwrap();
-
-    // and return the current buffer
-    buffer
 }
 
 fn terminal_main(file_path: OsString) {
@@ -1009,13 +1056,15 @@ fn terminal_main(file_path: OsString) {
     let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {});
 
     // draw beforehand
-    let mut current_buffer = render(
+    let (mut current_buffer, cursor_position) = render_editor_to_buffer(
         &editor,
         width as usize,
         height as usize,
         &file_path.to_string_lossy(),
-        "",
     );
+
+    // and render to the terminal
+    render(width as usize, cursor_position, &current_buffer, "");
 
     // event loop
     loop {
@@ -1035,13 +1084,22 @@ fn terminal_main(file_path: OsString) {
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
-                    current_buffer = render(
+                    let (next_buffer, cursor_position) = render_editor_to_buffer(
                         &editor,
                         width as usize,
                         height as usize,
                         &file_path.to_string_lossy(),
+                    );
+
+                    // and render to the terminal
+                    render(
+                        width as usize,
+                        cursor_position,
+                        &next_buffer,
                         &current_buffer,
                     );
+
+                    current_buffer = next_buffer;
                 }
                 Event::Key(KeyEvent {
                     code, modifiers, ..
@@ -1083,13 +1141,22 @@ fn terminal_main(file_path: OsString) {
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
-                    current_buffer = render(
+                    let (next_buffer, cursor_position) = render_editor_to_buffer(
                         &editor,
                         width as usize,
                         height as usize,
                         &file_path.to_string_lossy(),
+                    );
+
+                    // and render to the terminal
+                    render(
+                        width as usize,
+                        cursor_position,
+                        &next_buffer,
                         &current_buffer,
                     );
+
+                    current_buffer = next_buffer;
                 }
 
                 Event::Resize(..) => {
@@ -1100,13 +1167,15 @@ fn terminal_main(file_path: OsString) {
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
-                    current_buffer = render(
+                    let (current_buffer, cursor_position) = render_editor_to_buffer(
                         &editor,
                         width as usize,
                         height as usize,
                         &file_path.to_string_lossy(),
-                        "",
                     );
+
+                    // and render to the terminal
+                    render(width as usize, cursor_position, &current_buffer, "");
                 }
                 _ => (),
             }
@@ -1166,13 +1235,13 @@ fn gui_main(file_path: OsString) {
 
     while window.is_open() {
         // update editor
-    
+
         // get all glyphs that need to be laid out
-    
+
         // draw all glyphs to the right position
-    
+
         // and update
-    
+
         // update!
         window.update();
     }
