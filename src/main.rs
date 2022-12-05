@@ -868,10 +868,7 @@ fn render(
             SplitMode::ExactRight(1),
         )
         .get_buffer(width, height);
-
-    // hide the cursor to prevent flicker
-    queue!(stdout(), cursor::Hide).unwrap();
-
+ 
     // current position in the buffer
     let mut x = 0;
     let mut y = 0;
@@ -881,26 +878,33 @@ fn render(
     let mut prev_y = 0;
 
     // previous buffer chars
-    let mut prev_chars = previous_buffer.chars();
+    let mut prev_chars = previous_buffer.chars().peekable();
 
+    // whether to force move to the position
+    let mut force_move = true;
+    
     // and draw, char per char to ensure the correct cursor position
     for c in buffer.chars() {
-        // if y is the same and prev x is smaller or prev y is smaller, fetch the next char from the prev buffer, and update the position, if any
-        let prev_char = if true || (y == prev_y && prev_x < x) || prev_y < y {
-            // fetch
-            prev_chars.next()
-        } else {
-            None
-        };
-
         // don't draw if the positions are the same, and the character is as well
-        if x != prev_x || y != prev_y || Some(c) != prev_char {
+        if x != prev_x || y != prev_y || Some(&c) != prev_chars.peek() {
+            // only need to force move if the previous character was not ascii, or we are on a new line
+            if force_move {
+                queue!(stdout(), cursor::MoveTo(x as u16, y as u16)).unwrap();
+            }
+            
+            // print as normal
             queue!(
                 stdout(),
-                cursor::MoveTo(x as u16, y as u16),
                 style::Print(c)
             )
             .unwrap();
+            
+            // we moved, so this can be false because our position is known
+            // however, it may have changed if our character is not an ascii char (which has a known width)
+            force_move = !c.is_ascii() || c.is_ascii_control();
+        } else {
+            // we skipped something, so our position is now unknown
+            force_move = true;
         }
 
         // calculate the new cursor position
@@ -910,16 +914,25 @@ fn render(
         if x >= width {
             y += 1;
             x = 0;
+            
+            // moved to a new line, so do this to be sure
+            force_move = true;
         }
 
-        // update position of the prev char
-        if let Some(prev_c) = prev_char {
-            prev_x += string_width(std::iter::once(prev_c));
-
-            // and wrap
-            if prev_x >= width {
-                prev_y += 1;
-                prev_x = 0;
+        // next up, see if we need to update the previous character
+        while prev_x < x || prev_y < y {
+            if let Some(c) = prev_chars.next() {
+                // update the position
+                prev_x += string_width(std::iter::once(c));
+                
+                // and wrap
+                if prev_x >= width {
+                    prev_y += 1;
+                    prev_x = 0;
+                }
+            } else {
+                // no characters, stop
+                break;
             }
         }
     }
