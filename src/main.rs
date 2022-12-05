@@ -1167,7 +1167,7 @@ fn terminal_main(file_path: OsString) {
                     editor.set_scroll(width as usize, height as usize, 6, 6);
 
                     // render
-                    let (current_buffer, cursor_position) = render_editor_to_buffer(
+                    let (next_buffer, cursor_position) = render_editor_to_buffer(
                         &editor,
                         width as usize,
                         height as usize,
@@ -1175,7 +1175,9 @@ fn terminal_main(file_path: OsString) {
                     );
 
                     // and render to the terminal
-                    render(width as usize, cursor_position, &current_buffer, "");
+                    render(width as usize, cursor_position, &next_buffer, "");
+                
+                    current_buffer = next_buffer;
                 }
                 _ => (),
             }
