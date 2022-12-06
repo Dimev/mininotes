@@ -1085,9 +1085,13 @@ pub fn render(
 
 fn terminal_main(file_path: OsString) {
     // get the file
-    let Ok(file_content) = std::fs::read_to_string(&file_path) else {
-        println!("Failed to open file");
-        return;
+    let file_content = match std::fs::read_to_string(&file_path)  {
+        Ok(x) => x,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            println!("Failed to open file: {:?}", e);
+            return;
+        },
     };
 
     // set panic hook
@@ -1189,8 +1193,15 @@ fn terminal_main(file_path: OsString) {
                         break;
                     }
 
+                    // saving
+                    if code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
+                        let string = editor.to_string();
+
+                        // save, or create the file if it doesn't exists
+                        std::fs::write(file_path.as_os_str(), string).ok();
+                    }
                     // move cursor
-                    if code == KeyCode::Up {
+                    else if code == KeyCode::Up {
                         editor.move_cursor_vertical(-1, false);
                     } else if code == KeyCode::Down {
                         editor.move_cursor_vertical(1, false);

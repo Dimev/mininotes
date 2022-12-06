@@ -9,11 +9,12 @@ Current goals:
  - render to the terminal - V
  - make grapheme cluster navigation work - V
  - insert extra whitespace to match the previous line's whitespace that was before the cursor V
- - allow loading and saving files ~ loading done
+ - allow loading and saving files ~ Saving is kinda meh as it will open a file if it doesn't exist, but wont properly make the path to it
  - make terminal cursor position and text layout work (including scrolling) V
  - render to a gui (via minifb)
- - make gui terminal position and text layout work 
- - basic undo/redo/copy/paste, status bar
+ - make gui terminal position and text layout work ~ layout works, can't do input on it yet 
+ - basic undo/redo/copy/paste
+ - status bar V
  - skip words navigation
  - maybe bidir
 
