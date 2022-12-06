@@ -18,7 +18,7 @@ use std::ops::Range;
 // editor deps
 use ropey::{Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 // gui deps
 use minifb::{Window, WindowOptions};
@@ -35,7 +35,7 @@ use clap::Parser;
 
 /// return the start byte index of the unicode grapheme if the cursor is advanced by amount
 /// returns the length of the rope if it's too far
-fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usize {
+pub fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usize {
     // make a cursor
     let mut cursor = GraphemeCursor::new(byte_cursor, text.len_bytes(), true);
 
@@ -94,9 +94,8 @@ fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> usiz
     byte_cursor
 }
 
-// TODO: force the rope to be 1 wide if it's not fully newlines
 // this fixes terminal layout
-fn string_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
+pub fn string_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
     iterator
         .into_iter()
         .map(|x| x.width_cjk().unwrap_or(0))
@@ -104,7 +103,7 @@ fn string_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
 }
 
 // TODO: all newlines
-fn is_newline(c: char) -> bool {
+pub fn is_newline(c: char) -> bool {
     c == '\n'
 }
 
@@ -239,6 +238,11 @@ impl<L: LineLayout> TextEditor<L> {
             layout_settings,
             selection: None,
         }
+    }
+
+    /// convert the contents of the editor to a string
+    pub fn to_string(&self) -> String {
+        self.text.to_string()
     }
 
     /// move cursor horizontally, and save the cursor column if needed
@@ -529,7 +533,6 @@ impl<L: LineLayout> TextEditor<L> {
 
 // line numbers ==========================================
 
-// TODO: relative line numbers
 /// line numbers to show
 #[derive(Copy, Clone)]
 pub struct LineNumbers {
@@ -538,21 +541,62 @@ pub struct LineNumbers {
 
     /// total number of lines
     total: usize,
+
+    /// current line
+    current: usize,
+
+    /// whether it's relative
+    relative: bool,
 }
 
 impl LineNumbers {
+    pub fn new(start: usize, total: usize, current: usize, relative: bool) -> Self {
+        Self {
+            start,
+            total,
+            current,
+            relative,
+        }
+    }
+
     /// get how wide this should be
-    fn width(self) -> usize {
+    pub fn width(self, height: usize) -> usize {
         format!(" {} ", self.total).len()
     }
 
     /// how wide the number should be
-    fn width_number(self) -> usize {
+    pub fn width_number(self, height: usize) -> usize {
         format!("{}", self.total).len()
     }
 }
 
 // terminal ==============================================
+
+/// character type
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Char {
+    /// character
+    c: char,
+
+    /// color
+    color: Highlight,
+}
+
+impl Char {
+    pub fn new_text(c: char) -> Self {
+        Self {
+            c,
+            color: Highlight::Text,
+        }
+    }
+
+    pub fn new(c: char, color: Highlight) -> Self {
+        Self { c, color }
+    }
+}
+
+/// buffer type
+type ColoredString = Vec<Char>;
 
 /// type of highlight
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -572,7 +616,7 @@ pub enum Highlight {
 
 impl Highlight {
     /// returns the foreground color
-    fn get_color_foreground_crossterm(self) -> Color {
+    pub fn get_color_foreground_crossterm(self) -> Color {
         match self {
             Self::Text => Color::Reset,
             Self::Selection => Color::White,
@@ -582,7 +626,7 @@ impl Highlight {
     }
 
     /// returns the background color
-    fn get_color_background_crossterm(self) -> Color {
+    pub fn get_color_background_crossterm(self) -> Color {
         match self {
             Self::Text => Color::Reset,
             Self::Selection => Color::Grey,
@@ -591,8 +635,6 @@ impl Highlight {
         }
     }
 }
-
-// TODO: syntax highlighting here
 
 // ui layout/terminal drawing ===========================
 // TODO: move this around a bit
@@ -604,10 +646,10 @@ impl Highlight {
 // as well as size hints
 
 /// terminal rendering trait
-trait TerminalBuffer: Sized {
+pub trait TerminalBuffer: Sized {
     /// Get the buffer of this size
     /// This has to guarantee the buffer is of this exact size
-    fn get_buffer(&self, width: usize, height: usize) -> String;
+    fn get_buffer(&self, width: usize, height: usize) -> ColoredString;
 
     /// Compose a buffer to the other side
     fn left_of<'a, T: TerminalBuffer>(
@@ -664,7 +706,7 @@ trait TerminalBuffer: Sized {
 
 /// mode on how to treat split layout
 #[derive(Copy, Clone)]
-enum SplitMode {
+pub enum SplitMode {
     // TODO: inferred left and right
     // this uses the preferred with and height, if any, otherwise split by half
     // TODO: left or right only, to (not) show things when not needed
@@ -679,7 +721,7 @@ enum SplitMode {
 }
 
 impl SplitMode {
-    fn reverse(self) -> Self {
+    pub fn reverse(self) -> Self {
         match self {
             Self::Ratio(x) => Self::Ratio(1.0 - x),
             Self::ExactLeft(x) => Self::ExactRight(x),
@@ -692,14 +734,14 @@ impl SplitMode {
 
 /// pane split top and bottom
 #[derive(Copy, Clone)]
-struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
-    top: &'a L,
-    bottom: &'a R,
-    mode: SplitMode,
+pub struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
+    pub top: &'a L,
+    pub bottom: &'a R,
+    pub mode: SplitMode,
 }
 
 impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane<'a, L, R> {
-    fn get_buffer(&self, width: usize, height: usize) -> String {
+    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // figure out the correct split
         let split = match self.mode {
             SplitMode::Ratio(x) => (height as f32 * x) as usize,
@@ -712,20 +754,20 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane
         let bottom = self.bottom.get_buffer(width, height - split);
 
         // and just stitch them together
-        top.chars().chain(bottom.chars()).collect()
+        top.iter().chain(bottom.iter()).copied().collect()
     }
 }
 
 /// pane split left and right
 #[derive(Copy, Clone)]
-struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
+pub struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
     left: &'a L,
     right: &'a R,
     mode: SplitMode,
 }
 
 impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'a, L, R> {
-    fn get_buffer(&self, width: usize, height: usize) -> String {
+    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // figure out the correct split
         let split = match self.mode {
             SplitMode::Ratio(x) => (width as f32 * x) as usize,
@@ -737,23 +779,23 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'
         let left = self.left.get_buffer(split, height);
         let right = self.right.get_buffer(width - split, height);
 
-        let mut left_graphemes = left.graphemes(true);
-        let mut right_graphemes = right.graphemes(true);
+        let mut left_chars = left.iter();
+        let mut right_chars = right.iter();
 
         // current column
         let mut column = 0;
 
         // string to generate
-        let mut buffer = String::with_capacity(left.len() + right.len());
+        let mut buffer = ColoredString::with_capacity(left.len() + right.len());
 
         // and add the lines together
-        while let Some(grapheme) = if column < split {
-            left_graphemes.next()
+        while let Some(character) = if column < split {
+            left_chars.next()
         } else {
-            right_graphemes.next()
+            right_chars.next()
         } {
             // add to the column
-            column += grapheme.width_cjk();
+            column += string_width(std::iter::once(character.c));
 
             // wrap if it's on the next line
             if column >= width {
@@ -761,49 +803,51 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'
             }
 
             // push it
-            buffer.push_str(grapheme);
+            buffer.push(*character);
         }
 
         buffer
     }
 }
 
-struct TextLine<'a> {
+pub struct TextLine<'a> {
     string: &'a str,
 }
 
 impl<'a> TextLine<'a> {
-    fn new(string: &'a str) -> Self {
+    pub fn new(string: &'a str) -> Self {
         Self { string }
     }
 }
 
 impl<'a> TerminalBuffer for TextLine<'a> {
-    fn get_buffer(&self, width: usize, height: usize) -> String {
+    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // simply add extra padding
         // TODO: wrapping?
         self.string
             .chars()
             .chain(std::iter::repeat(' '))
             .scan(0, |acc, x| {
-                *acc += x.width_cjk().unwrap_or(0);
+                *acc += string_width(std::iter::once(x));
                 if *acc <= width * height {
                     Some(x)
                 } else {
                     None
                 }
             })
+            .map(|c| Char::new(c, Highlight::Status))
             .collect()
     }
 }
 
 impl TerminalBuffer for LineNumbers {
-    fn get_buffer(&self, width: usize, height: usize) -> String {
+    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // TODO: width/height guarantees
-        assert!(width >= self.width(), "TODO: uphold width guarantee");
+        assert!(width >= self.width(height), "TODO: uphold width guarantee");
 
+        // TODO: better in general
         // get the total width of the number
-        let number_padding = self.width_number();
+        let number_padding = self.width_number(height);
 
         // iterator over the numbered lines
         let numbered =
@@ -813,16 +857,22 @@ impl TerminalBuffer for LineNumbers {
         let rest = std::iter::repeat(format!(" {:>1$} ", "~", number_padding));
 
         // collect
-        numbered.chain(rest).take(height).collect()
+        numbered
+            .chain(rest)
+            .take(height)
+            .collect::<String>()
+            .chars()
+            .map(|c| Char::new(c, Highlight::Gutter))
+            .collect()
     }
 }
 
 impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
     /// get the currently visible buffer, as a list of lines
     /// this is assuming a terminal editor, and should not be used when doing a gui editor
-    fn get_buffer(&self, width: usize, height: usize) -> String {
+    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // all found text lines
-        let mut buffer = String::with_capacity(width * height);
+        let mut buffer = ColoredString::with_capacity(width * height);
 
         // go over all lines in the buffer
         for line_num in self.scroll_lines..self.scroll_lines + height {
@@ -854,21 +904,22 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
                     if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
                     {
                         buffer.extend(
-                            std::iter::repeat(' ')
+                            std::iter::repeat(Char::new_text(' '))
                                 .take(column + grapheme_width - self.scroll_columns),
                         );
 
-                    // if we exceed the line, pad spaces instead
+                    // if we exceed the line, pad spaces instead/
                     } else if column + grapheme_width > self.scroll_columns + width {
                         buffer.extend(
-                            std::iter::repeat(' ').take(self.scroll_columns + width - column),
+                            std::iter::repeat(Char::new_text(' '))
+                                .take(self.scroll_columns + width - column),
                         );
 
                     // otherwise, add our characters
                     } else if column >= self.scroll_columns
                         && column + grapheme_width <= self.scroll_columns + width
                     {
-                        buffer.extend(grapheme.chars());
+                        buffer.extend(grapheme.chars().map(|x| Char::new_text(x)));
                     }
 
                     // update
@@ -878,7 +929,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
             }
 
             // final padding
-            buffer.extend(std::iter::repeat(' ').take(
+            buffer.extend(std::iter::repeat(Char::new_text(' ')).take(
                 (width + self.scroll_columns).saturating_sub(column.max(self.scroll_columns)),
             ));
         }
@@ -888,16 +939,18 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
 }
 
 /// render the editor to a buffer
-fn render_editor_to_buffer(
+pub fn render_editor_to_buffer(
     editor: &TextEditor<TermLineLayoutSettings>,
     width: usize,
     height: usize,
     filename: &str,
-) -> (String, Option<(usize, usize)>) {
-    let lines = LineNumbers {
-        start: editor.get_first_visible_line(),
-        total: editor.len_lines(),
-    };
+) -> (ColoredString, Option<(usize, usize)>) {
+    let lines = LineNumbers::new(
+        editor.get_first_visible_line(),
+        editor.len_lines(),
+        0,
+        false,
+    );
 
     let status_line = format!(
         " {} {}:{}",
@@ -909,12 +962,12 @@ fn render_editor_to_buffer(
     // cursor position
     let cursor_pos = editor
         .get_relative_cursor_pos()
-        .map(|(x, y)| (x + lines.width(), y));
+        .map(|(x, y)| (x + lines.width(height), y));
 
     // and simply perform layout
     (
         lines
-            .left_of(&editor, SplitMode::ExactLeft(lines.width()))
+            .left_of(&editor, SplitMode::ExactLeft(lines.width(height)))
             .top_of(&TextLine::new(&status_line), SplitMode::ExactRight(1))
             .get_buffer(width, height),
         cursor_pos,
@@ -922,11 +975,11 @@ fn render_editor_to_buffer(
 }
 
 /// render to the terminal, with differencing to not redraw the whole screen
-fn render(
+pub fn render(
     width: usize,
     cursor_position: Option<(usize, usize)>,
-    buffer: &str,
-    previous_buffer: &str,
+    buffer: &[Char],
+    previous_buffer: &[Char],
 ) {
     // current position in the buffer
     let mut x = 0;
@@ -937,13 +990,25 @@ fn render(
     let mut prev_y = 0;
 
     // previous buffer chars
-    let mut prev_chars = previous_buffer.chars().peekable();
+    let mut prev_chars = previous_buffer.iter().peekable();
 
     // whether to force move to the position
     let mut force_move = true;
 
+    // previous colors
+    let mut prev_fg = Color::Reset;
+    let mut prev_bg = Color::Reset;
+
+    // force reset the colors, ensure they are known
+    queue!(
+        stdout(),
+        style::SetForegroundColor(Color::Reset),
+        style::SetBackgroundColor(Color::Reset)
+    )
+    .unwrap();
+
     // and draw, char per char to ensure the correct cursor position
-    for c in buffer.chars() {
+    for c in buffer.iter() {
         // don't draw if the positions are the same, and the character is as well
         if x != prev_x || y != prev_y || Some(&c) != prev_chars.peek() {
             // only need to force move if the previous character was not ascii, or we are on a new line
@@ -951,19 +1016,34 @@ fn render(
                 queue!(stdout(), cursor::MoveTo(x as u16, y as u16)).unwrap();
             }
 
+            // get the new colors
+            let fg = c.color.get_color_foreground_crossterm();
+            let bg = c.color.get_color_background_crossterm();
+
+            // change the color, if needed
+            if fg != prev_fg {
+                queue!(stdout(), style::SetForegroundColor(fg)).unwrap();
+                prev_fg = fg;
+            }
+
+            if bg != prev_bg {
+                queue!(stdout(), style::SetBackgroundColor(bg)).unwrap();
+                prev_bg = bg;
+            }
+
             // print as normal
-            queue!(stdout(), style::Print(c)).unwrap();
+            queue!(stdout(), style::Print(c.c)).unwrap();
 
             // we moved, so this can be false because our position is known
             // however, it may have changed if our character is not an ascii char (which has a known width)
-            force_move = !c.is_ascii() || c.is_ascii_control();
+            force_move = !c.c.is_ascii() || c.c.is_ascii_control();
         } else {
             // we skipped something, so our position is now unknown
             force_move = true;
         }
 
         // calculate the new cursor position
-        x += string_width(std::iter::once(c));
+        x += string_width(std::iter::once(c.c));
 
         // if it's off to the side, reset
         if x >= width {
@@ -978,7 +1058,7 @@ fn render(
         while prev_x < x || prev_y < y {
             if let Some(c) = prev_chars.next() {
                 // update the position
-                prev_x += string_width(std::iter::once(c));
+                prev_x += string_width(std::iter::once(c.c));
 
                 // and wrap
                 if prev_x >= width {
@@ -1064,7 +1144,7 @@ fn terminal_main(file_path: OsString) {
     );
 
     // and render to the terminal
-    render(width as usize, cursor_position, &current_buffer, "");
+    render(width as usize, cursor_position, &current_buffer, &[]);
 
     // event loop
     loop {
@@ -1175,8 +1255,8 @@ fn terminal_main(file_path: OsString) {
                     );
 
                     // and render to the terminal
-                    render(width as usize, cursor_position, &next_buffer, "");
-                
+                    render(width as usize, cursor_position, &next_buffer, &[]);
+
                     current_buffer = next_buffer;
                 }
                 _ => (),
