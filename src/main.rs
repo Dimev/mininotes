@@ -13,7 +13,6 @@ use swash::FontRef;
 
 use std::ffi::OsString;
 use std::io::{stdout, Write};
-use std::ops::Range;
 
 // editor deps
 use ropey::{Rope, RopeSlice};
@@ -224,7 +223,7 @@ pub struct TextEditor<L: LineLayout> {
     layout_settings: L,
 
     /// selection, byte range
-    selection: Option<Range<usize>>,
+    selection: Option<(usize, usize)>,
 }
 
 impl<L: LineLayout> TextEditor<L> {
@@ -245,8 +244,23 @@ impl<L: LineLayout> TextEditor<L> {
         self.text.to_string()
     }
 
+    /// clear the selection, unselect text, don't edit it
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+    
+    /// add to the selection, based on the current cursor position
+    pub fn add_selection(&mut self) {
+        todo!()
+    }
+
     /// move cursor horizontally, and save the cursor column if needed
-    pub fn move_cursor_horizontal(&mut self, amount: isize, save_column: bool) {
+    pub fn move_cursor_horizontal(
+        &mut self,
+        amount: isize,
+        add_selection: bool,
+        save_column: bool,
+    ) {
         // just move it
         self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));
 
@@ -254,10 +268,36 @@ impl<L: LineLayout> TextEditor<L> {
         if save_column {
             self.target_column = self.get_cursor_column();
         }
+
+        // clear selection if not needed
+        if !add_selection {
+            self.clear_selection();
+        }
+
+        // make a new selection, if needed
+        if add_selection && self.selection.is_none() {
+            // new selection, current grapheme
+            self.selection = Some((
+                self.cursor,
+                move_grapheme(1, self.cursor, self.text.slice(..)),
+            ));
+        }
+        // expand selection
+        if add_selection {
+            self.selection = self.selection.map(|(start, end)| {
+                // move this back
+                let new_start = start.min(self.cursor);
+
+                // and this forward
+                let new_end = end.max(move_grapheme(1, self.cursor, self.text.slice(..)));
+
+                (new_start, new_end)
+            });
+        }
     }
 
     /// move cursor vertically, and save the column if needed
-    pub fn move_cursor_vertical(&mut self, amount: isize, save_column: bool) {
+    pub fn move_cursor_vertical(&mut self, amount: isize, add_selection: bool, save_column: bool) {
         // find where the next line is
         let next_line = (self.text.byte_to_line(self.cursor) as isize + amount)
             .max(0)
@@ -267,7 +307,7 @@ impl<L: LineLayout> TextEditor<L> {
         self.cursor = self.text.line_to_byte(next_line);
 
         // move horizontally until we are at the target
-        self.move_cursor_to_column(self.target_column, save_column);
+        self.move_cursor_to_column(self.target_column, add_selection, save_column);
     }
 
     /// insert a character
@@ -277,7 +317,7 @@ impl<L: LineLayout> TextEditor<L> {
             .insert_char(self.text.byte_to_char(self.cursor), character);
 
         // move the cursor over
-        self.move_cursor_horizontal(1, true);
+        self.move_cursor_horizontal(1, false, true);
     }
 
     /// insert a string
@@ -287,7 +327,7 @@ impl<L: LineLayout> TextEditor<L> {
             .insert(self.text.byte_to_char(self.cursor), string);
 
         // move the cursor over
-        self.move_cursor_horizontal(string.graphemes(true).count() as isize, true);
+        self.move_cursor_horizontal(string.graphemes(true).count() as isize, false, true);
     }
 
     /// insert a newline
@@ -327,7 +367,7 @@ impl<L: LineLayout> TextEditor<L> {
             let end = self.text.byte_to_char(self.cursor);
 
             // move back
-            self.move_cursor_horizontal(-1, true);
+            self.move_cursor_horizontal(-1, false, true);
 
             // we are now at the start
             let start = self.text.byte_to_char(self.cursor);
@@ -340,7 +380,7 @@ impl<L: LineLayout> TextEditor<L> {
             let start = self.text.byte_to_char(start_byte);
 
             // move forward
-            self.move_cursor_horizontal(1, true);
+            self.move_cursor_horizontal(1, false, true);
 
             // we are now at the end
             let end = self.text.byte_to_char(self.cursor);
@@ -354,9 +394,10 @@ impl<L: LineLayout> TextEditor<L> {
     }
 
     /// move the cursor to a specific column, assuming a terminal program
-    pub fn move_cursor_to_column(&mut self, column: usize, save_column: bool) {
+    pub fn move_cursor_to_column(&mut self, column: usize, add_selection: bool, save_column: bool) {
         // move the cursor to the start of the line
-        self.move_cursor_to_start_of_line(save_column);
+        // TODO: redo this so it doesn't break selection
+        self.move_cursor_to_start_of_line(add_selection, save_column);
 
         // get the current line
         let line = self.text.line(self.text.byte_to_line(self.cursor));
@@ -373,20 +414,22 @@ impl<L: LineLayout> TextEditor<L> {
             self.cursor = cursor;
         } else {
             // otherwise, move it to the end of the line, as that would be expected
-            self.move_cursor_to_end_of_line(save_column);
+            self.move_cursor_to_end_of_line(add_selection, save_column);
         }
     }
 
     /// move the cursor to the start of the line
-    pub fn move_cursor_to_start_of_line(&mut self, save_column: bool) {
+    pub fn move_cursor_to_start_of_line(&mut self, add_selection: bool, save_column: bool) {
         self.cursor = self.text.line_to_byte(self.text.byte_to_line(self.cursor));
         if save_column {
             self.target_column = 0;
         }
+        
+        // TODO: selection
     }
 
     /// move the cursor to the end of the line
-    pub fn move_cursor_to_end_of_line(&mut self, save_column: bool) {
+    pub fn move_cursor_to_end_of_line(&mut self, add_selection: bool, save_column: bool) {
         // do nothing if we are at the end of the file
         if self.cursor != self.text.len_bytes() {
             // move it to the start of the next line
@@ -402,7 +445,7 @@ impl<L: LineLayout> TextEditor<L> {
 
             // move it back, if we're not at the last line
             if line + 1 < self.text.len_lines() {
-                self.move_cursor_horizontal(-1, save_column);
+                self.move_cursor_horizontal(-1, add_selection, save_column);
             }
         }
     }
@@ -477,7 +520,7 @@ impl<L: LineLayout> TextEditor<L> {
     }
 
     /// set the cursor pos
-    pub fn set_cursor_pos(&mut self, x: usize, y: usize) {
+    pub fn set_cursor_pos(&mut self, x: usize, y: usize, add_selection: bool) {
         // find the line
         let line = y.min(self.text.len_lines());
 
@@ -488,13 +531,13 @@ impl<L: LineLayout> TextEditor<L> {
         self.cursor = line_start;
 
         // and move the cursor to the right column
-        self.move_cursor_to_column(x, true);
+        self.move_cursor_to_column(x, add_selection, true);
     }
 
     /// set the cursor pos, relative to scrolling
-    pub fn set_relative_cursor_pos(&mut self, x: usize, y: usize) {
+    pub fn set_relative_cursor_pos(&mut self, x: usize, y: usize, add_selection: bool) {
         // set with the absolute coords
-        self.set_cursor_pos(x + self.scroll_columns, y + self.scroll_lines);
+        self.set_cursor_pos(x + self.scroll_columns, y + self.scroll_lines, add_selection);
     }
 
     /// set the right scrolling values so the text stays in frame
@@ -583,10 +626,14 @@ pub struct Char {
 }
 
 impl Char {
-    pub fn new_text(c: char) -> Self {
+    pub fn new_text(c: char, selected: bool) -> Self {
         Self {
             c,
-            color: Highlight::Text,
+            color: if selected {
+                Highlight::Selection
+            } else {
+                Highlight::Text
+            },
         }
     }
 
@@ -619,7 +666,7 @@ impl Highlight {
     pub fn get_color_foreground_crossterm(self) -> Color {
         match self {
             Self::Text => Color::Reset,
-            Self::Selection => Color::White,
+            Self::Selection => Color::Black,
             Self::Gutter => Color::Yellow,
             Self::Status => Color::Black,
         }
@@ -874,6 +921,12 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
         // all found text lines
         let mut buffer = ColoredString::with_capacity(width * height);
 
+        // selection range, empty if none exists
+        let selection_range = self
+            .selection
+            .map(|(start, end)| start..end)
+            .unwrap_or(0..0);
+
         // go over all lines in the buffer
         for line_num in self.scroll_lines..self.scroll_lines + height {
             // current column
@@ -884,6 +937,9 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
 
             // get the line
             if let Some(line) = self.text.get_line(line_num) {
+                // where in the buffer the line is
+                let line_start = self.text.line_to_byte(line_num);
+
                 // go over all columns until we are either out of bounds or end of the line
                 while cursor < line.len_bytes() && column < self.scroll_columns + width {
                     // get the next cursor pos
@@ -904,14 +960,14 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
                     if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
                     {
                         buffer.extend(
-                            std::iter::repeat(Char::new_text(' '))
+                            std::iter::repeat(Char::new_text(' ', false))
                                 .take(column + grapheme_width - self.scroll_columns),
                         );
 
-                    // if we exceed the line, pad spaces instead/
+                    // if we exceed the line, pad spaces instead
                     } else if column + grapheme_width > self.scroll_columns + width {
                         buffer.extend(
-                            std::iter::repeat(Char::new_text(' '))
+                            std::iter::repeat(Char::new_text(' ', false))
                                 .take(self.scroll_columns + width - column),
                         );
 
@@ -919,7 +975,9 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
                     } else if column >= self.scroll_columns
                         && column + grapheme_width <= self.scroll_columns + width
                     {
-                        buffer.extend(grapheme.chars().map(|x| Char::new_text(x)));
+                        buffer.extend(grapheme.chars().map(|x| {
+                            Char::new_text(x, selection_range.contains(&(cursor + line_start)))
+                        }));
                     }
 
                     // update
@@ -929,7 +987,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
             }
 
             // final padding
-            buffer.extend(std::iter::repeat(Char::new_text(' ')).take(
+            buffer.extend(std::iter::repeat(Char::new_text(' ', false)).take(
                 (width + self.scroll_columns).saturating_sub(column.max(self.scroll_columns)),
             ));
         }
@@ -1085,13 +1143,13 @@ pub fn render(
 
 fn terminal_main(file_path: OsString) {
     // get the file
-    let file_content = match std::fs::read_to_string(&file_path)  {
+    let file_content = match std::fs::read_to_string(&file_path) {
         Ok(x) => x,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             println!("Failed to open file: {:?}", e);
             return;
-        },
+        }
     };
 
     // set panic hook
@@ -1162,7 +1220,7 @@ fn terminal_main(file_path: OsString) {
                     ..
                 }) => {
                     // mouse move
-                    editor.set_relative_cursor_pos(column as usize, row as usize);
+                    editor.set_relative_cursor_pos(column as usize, row as usize, false);
 
                     // fix scrolling before rendering
                     editor.set_scroll(width as usize, height as usize, 6, 6);
@@ -1202,17 +1260,17 @@ fn terminal_main(file_path: OsString) {
                     }
                     // move cursor
                     else if code == KeyCode::Up {
-                        editor.move_cursor_vertical(-1, false);
+                        editor.move_cursor_vertical(-1, modifiers == KeyModifiers::SHIFT, false);
                     } else if code == KeyCode::Down {
-                        editor.move_cursor_vertical(1, false);
+                        editor.move_cursor_vertical(1, modifiers == KeyModifiers::SHIFT, false);
                     } else if code == KeyCode::Left {
-                        editor.move_cursor_horizontal(-1, true);
+                        editor.move_cursor_horizontal(-1, modifiers == KeyModifiers::SHIFT, true);
                     } else if code == KeyCode::Right {
-                        editor.move_cursor_horizontal(1, true);
+                        editor.move_cursor_horizontal(1, modifiers == KeyModifiers::SHIFT, true);
                     } else if code == KeyCode::Home {
-                        editor.move_cursor_to_start_of_line(true);
+                        editor.move_cursor_to_start_of_line(modifiers == KeyModifiers::SHIFT, true);
                     } else if code == KeyCode::End {
-                        editor.move_cursor_to_end_of_line(true);
+                        editor.move_cursor_to_end_of_line(modifiers == KeyModifiers::SHIFT, true);
                     }
                     // insert text
                     else if let KeyCode::Char(c) = code {
