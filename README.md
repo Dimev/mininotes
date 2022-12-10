@@ -13,8 +13,9 @@ Current goals:
  - make terminal cursor position and text layout work (including scrolling) V
  - render to a gui (via minifb)
  - make gui terminal position and text layout work ~ layout works, can't do input on it yet 
- - basic undo/redo/copy/paste
+ - basic undo/redo/copy/paste ~ Undo-Redo almost works nicely, selection as well
  - status bar V
+ - pageup/pagedown scroll
  - skip words navigation
  - maybe bidir
 

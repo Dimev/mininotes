@@ -1,6 +1,6 @@
 // terminal deps
 use crossterm::{
-    cursor,
+    cursor::{self, CursorShape},
     event::{
         poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
         KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -11,13 +11,15 @@ use crossterm::{
 };
 use swash::FontRef;
 
-use std::ffi::OsString;
 use std::io::{stdout, Write};
+use std::{collections::VecDeque, ffi::OsString};
 
 // editor deps
 use ropey::{Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 use unicode_width::UnicodeWidthChar;
+
+use std::ops::Range;
 
 // gui deps
 use minifb::{Window, WindowOptions};
@@ -93,7 +95,8 @@ pub fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> 
     byte_cursor
 }
 
-// this fixes terminal layout
+/// with of a char iterator in unicode characters
+/// this helps when working with terminal UI layout
 pub fn string_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
     iterator
         .into_iter()
@@ -202,6 +205,22 @@ impl<'a> Iterator for TermLineLayout<'a> {
 
 // editor ====================================================
 
+/// undo/redo action
+#[derive(Debug, Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EditorAction {
+    /// delete a character at this character index
+    /// remove(cursor..=cursor) in ropey
+    Delete(usize, char, bool),
+
+    /// insert a character at this character index
+    /// insert_char(cursor, char) in ropey
+    Insert(usize, char),
+
+    /// indicator for the start of a new action
+    /// actions MUST always be 1 or more Delete/Insert long
+    ActionStart,
+}
+
 /// multiline text editor
 pub struct TextEditor<L: LineLayout> {
     /// text
@@ -222,12 +241,27 @@ pub struct TextEditor<L: LineLayout> {
     /// line layout settings
     layout_settings: L,
 
-    /// selection, byte range
-    selection: Option<(usize, usize)>,
+    /// selection anchor, aka where it starts
+    /// the end range is the cursor
+    selection_anchor: Option<usize>,
+
+    /// undo/redo buffer
+    history: VecDeque<EditorAction>,
+
+    /// where the last save was in the history, if any
+    save_anchor: Option<usize>,
+
+    /// where we are right now in the history
+    current_history: usize,
+
+    /// max undo/redo buffer size
+    history_size: usize,
 }
 
 impl<L: LineLayout> TextEditor<L> {
-    pub fn new(content: &str, layout_settings: L) -> Self {
+    /// create a new editor from the given string and layout settings
+    /// newly loaded means it's unsaved
+    pub fn new(content: &str, layout_settings: L, newly_loaded: bool) -> Self {
         Self {
             text: Rope::from_str(content),
             cursor: 0,
@@ -235,7 +269,11 @@ impl<L: LineLayout> TextEditor<L> {
             scroll_lines: 0,
             scroll_columns: 0,
             layout_settings,
-            selection: None,
+            selection_anchor: None,
+            history: VecDeque::new(),
+            save_anchor: if newly_loaded { None } else { Some(0) },
+            current_history: 0,
+            history_size: 4096,
         }
     }
 
@@ -244,14 +282,173 @@ impl<L: LineLayout> TextEditor<L> {
         self.text.to_string()
     }
 
+    /// set the save point in the history to now
+    /// this means that the current content should be saved to a file
+    pub fn set_saved(&mut self) {
+        self.save_anchor = Some(self.current_history);
+    }
+
+    /// get if the contents have been changed since last save
+    pub fn has_changed_since_save(&self) -> bool {
+        self.save_anchor != Some(self.current_history)
+    }
+
+    /// discards all changes since the save
+    pub fn discard_changes(&mut self) {
+        todo!();
+    }
+
+    /// undo a changei
+    // TODO: Still slightly breaks when doing undo followed by redo
+    pub fn undo(&mut self) {
+        // can only undo if we have history
+        while self.current_history > 0 {
+            // we move backward
+            self.current_history -= 1;
+
+            // get the current change
+            let change = self.history[self.current_history];
+
+            // and undo the change
+            match change {
+                EditorAction::Delete(cursor, character, before) => {
+                    // insert the character
+                    self.text.insert_char(cursor, character);
+
+                    // restore cursor
+                    self.cursor = self.text.char_to_byte(cursor);
+
+                    // restore it properly, if needed
+                    if before {
+                        self.cursor = move_grapheme(1, self.cursor, self.text.slice(..))
+                    }
+                }
+                EditorAction::Insert(cursor, _) => {
+                    // delete the character
+                    self.text.remove(cursor..=cursor);
+
+                    // restore cursor
+                    self.cursor = self.text.char_to_byte(cursor);
+                }
+                EditorAction::ActionStart => {
+                    // stop
+                    break;
+                }
+            }
+        }
+    }
+
+    /// redo a change
+    pub fn redo(&mut self) {
+        // can only redo if we're not at the end of history
+        while self.history.len() > self.current_history {
+            // get the change
+            let change = self.history[self.current_history];
+
+            // we move one forward
+            self.current_history += 1;
+
+            // and redo the change
+            match change {
+                EditorAction::Insert(cursor, character) => {
+                    // insert the character
+                    self.text.insert_char(cursor, character);
+
+                    // restore cursor
+                    self.cursor = self.text.char_to_byte(cursor);
+
+                    // restore it properly
+                    self.cursor = move_grapheme(1, self.cursor, self.text.slice(..));
+                }
+                EditorAction::Delete(cursor, _, _) => {
+                    // delete the character
+                    self.text.remove(cursor..=cursor);
+
+                    // restore cursor
+                    self.cursor = self.text.char_to_byte(cursor);
+                }
+                EditorAction::ActionStart => {
+                    // stop
+                    break;
+                }
+            }
+        }
+    }
+
+    /// insert a new, single change
+    pub fn do_change(&mut self, change: EditorAction) {
+        // TODO: check if the change we do is the inverse of the last change change done, that way we can remove it and have consistency with some other editors
+
+        // purge history after this point
+        while self.history.len() > self.current_history {
+            self.history.pop_back();
+        }
+
+        // insert it
+        self.history.push_back(change);
+        self.current_history += 1;
+
+        // purge end of the queue if it's too long
+        // if the queue is small enough, only stop once we find an action start, to avoid undoing partial actions
+        // ensure that our save anchor and current point in the history remain in the history however
+        while self.current_history > 0
+            && self.save_anchor.map(|x| x > 0).unwrap_or(true)
+            && if self.history.len() > self.history_size {
+                true
+            } else {
+                self.history
+                    .front()
+                    .map(|x| x != &EditorAction::ActionStart)
+                    .unwrap_or(false)
+            }
+        {
+            // move these back
+            self.current_history -= 1;
+            self.save_anchor = self.save_anchor.map(|x| x - 1);
+
+            // and pop the front off
+            self.history.pop_front();
+        }
+    }
+
+    /// insert the start of an action that can be undone
+    pub fn start_change(&mut self) {
+        // just insert a marker
+        self.do_change(EditorAction::ActionStart);
+    }
+
     /// clear the selection, unselect text, don't edit it
     pub fn clear_selection(&mut self) {
-        self.selection = None;
+        self.selection_anchor = None;
     }
-    
+
+    /// get the current selection
+    pub fn get_selection(&self) -> RopeSlice {
+        todo!()
+    }
+
+    /// remove the selection
+    pub fn cut_selection(&mut self) {
+        todo!()
+    }
+
+    /// get the selection range
+    pub fn get_selection_range(&self) -> Option<Range<usize>> {
+        self.selection_anchor.map(|x| {
+            if x > self.cursor {
+                self.cursor..x
+            } else {
+                x..self.cursor
+            }
+        })
+    }
+
     /// add to the selection, based on the current cursor position
     pub fn add_selection(&mut self) {
-        todo!()
+        // if it's empty, start, otherwise simply retain it
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor)
+        }
     }
 
     /// move cursor horizontally, and save the cursor column if needed
@@ -261,6 +458,13 @@ impl<L: LineLayout> TextEditor<L> {
         add_selection: bool,
         save_column: bool,
     ) {
+        // add to the selection if needed, do this first so it makes most sense
+        if add_selection {
+            self.add_selection();
+        } else {
+            self.clear_selection();
+        }
+
         // just move it
         self.cursor = move_grapheme(amount, self.cursor, self.text.slice(..));
 
@@ -268,36 +472,17 @@ impl<L: LineLayout> TextEditor<L> {
         if save_column {
             self.target_column = self.get_cursor_column();
         }
-
-        // clear selection if not needed
-        if !add_selection {
-            self.clear_selection();
-        }
-
-        // make a new selection, if needed
-        if add_selection && self.selection.is_none() {
-            // new selection, current grapheme
-            self.selection = Some((
-                self.cursor,
-                move_grapheme(1, self.cursor, self.text.slice(..)),
-            ));
-        }
-        // expand selection
-        if add_selection {
-            self.selection = self.selection.map(|(start, end)| {
-                // move this back
-                let new_start = start.min(self.cursor);
-
-                // and this forward
-                let new_end = end.max(move_grapheme(1, self.cursor, self.text.slice(..)));
-
-                (new_start, new_end)
-            });
-        }
     }
 
     /// move cursor vertically, and save the column if needed
     pub fn move_cursor_vertical(&mut self, amount: isize, add_selection: bool, save_column: bool) {
+        // add to the selection
+        if add_selection {
+            self.add_selection();
+        } else {
+            self.clear_selection();
+        }
+
         // find where the next line is
         let next_line = (self.text.byte_to_line(self.cursor) as isize + amount)
             .max(0)
@@ -311,20 +496,44 @@ impl<L: LineLayout> TextEditor<L> {
     }
 
     /// insert a character
-    pub fn insert_character(&mut self, character: char) {
+    /// start_change indicates if this a singular action (true) or part of a larger action that needs to be undone (false)
+    pub fn insert_character(&mut self, character: char, start_change: bool) {
+        // position
+        let char_pos = self.text.byte_to_char(self.cursor);
+
         // insert
-        self.text
-            .insert_char(self.text.byte_to_char(self.cursor), character);
+        self.text.insert_char(char_pos, character);
+
+        // save to history
+        if start_change {
+            self.start_change();
+        }
+
+        // actually store the change
+        self.do_change(EditorAction::Insert(char_pos, character));
 
         // move the cursor over
         self.move_cursor_horizontal(1, false, true);
     }
 
     /// insert a string
-    pub fn insert_string(&mut self, string: &str) {
+    /// start_change indicates if this is a singular action (true) or part of a larger action that needs to be undone (false)
+    pub fn insert_string(&mut self, string: &str, start_change: bool) {
+        // get the start position
+        let char_pos = self.text.byte_to_char(self.cursor);
+
         // insert
-        self.text
-            .insert(self.text.byte_to_char(self.cursor), string);
+        self.text.insert(char_pos, string);
+
+        // save to history
+        if start_change {
+            self.start_change();
+        }
+
+        // actually store the change
+        for (idx, character) in string.chars().enumerate() {
+            self.do_change(EditorAction::Insert(char_pos + idx, character));
+        }
 
         // move the cursor over
         self.move_cursor_horizontal(string.graphemes(true).count() as isize, false, true);
@@ -352,16 +561,23 @@ impl<L: LineLayout> TextEditor<L> {
             .take(line_char_pos - line_char_start)
             .collect::<String>();
 
+        // store the change
+        self.start_change();
+
         // insert a newline
-        self.insert_character('\n');
+        self.insert_character('\n', false);
 
         // append the extra whitespaces
-        self.insert_string(&pred_whitespace);
+        self.insert_string(&pred_whitespace, false);
     }
 
     /// remove a character at the cursor.
     /// before means remove it before the cursor, same as backspace
     pub fn remove_character(&mut self, before: bool) {
+        // this happens anyway
+        self.start_change();
+
+        // this differs a bit whether the character before or after needs to be removed
         if before {
             // end of the character to remove
             let end = self.text.byte_to_char(self.cursor);
@@ -371,6 +587,11 @@ impl<L: LineLayout> TextEditor<L> {
 
             // we are now at the start
             let start = self.text.byte_to_char(self.cursor);
+
+            // save to history, need to save to a vec first to avoid borrowing the text mutably while also doing do change
+            for character in self.text.slice(start..end).chars().collect::<Vec<char>>() {
+                self.do_change(EditorAction::Delete(start, character, before));
+            }
 
             // remove it
             self.text.remove(start..end);
@@ -388,15 +609,28 @@ impl<L: LineLayout> TextEditor<L> {
             // restore position
             self.cursor = start_byte;
 
+            // save to history
+            for character in self.text.slice(start..end).chars().collect::<Vec<char>>() {
+                self.do_change(EditorAction::Delete(start, character, before));
+            }
+
             // remove the next character
             self.text.remove(start..end);
         }
     }
 
+    // TODO: remove a range of characters
+
     /// move the cursor to a specific column, assuming a terminal program
     pub fn move_cursor_to_column(&mut self, column: usize, add_selection: bool, save_column: bool) {
+        // add to the selection if needed
+        if add_selection {
+            self.add_selection();
+        } else {
+            self.clear_selection();
+        }
+
         // move the cursor to the start of the line
-        // TODO: redo this so it doesn't break selection
         self.move_cursor_to_start_of_line(add_selection, save_column);
 
         // get the current line
@@ -420,16 +654,28 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// move the cursor to the start of the line
     pub fn move_cursor_to_start_of_line(&mut self, add_selection: bool, save_column: bool) {
+        // add to the selection if needed
+        if add_selection {
+            self.add_selection();
+        } else {
+            self.clear_selection();
+        }
+
         self.cursor = self.text.line_to_byte(self.text.byte_to_line(self.cursor));
         if save_column {
             self.target_column = 0;
         }
-        
-        // TODO: selection
     }
 
     /// move the cursor to the end of the line
     pub fn move_cursor_to_end_of_line(&mut self, add_selection: bool, save_column: bool) {
+        // add to the selection
+        if add_selection {
+            self.add_selection();
+        } else {
+            self.clear_selection();
+        }
+
         // do nothing if we are at the end of the file
         if self.cursor != self.text.len_bytes() {
             // move it to the start of the next line
@@ -537,7 +783,11 @@ impl<L: LineLayout> TextEditor<L> {
     /// set the cursor pos, relative to scrolling
     pub fn set_relative_cursor_pos(&mut self, x: usize, y: usize, add_selection: bool) {
         // set with the absolute coords
-        self.set_cursor_pos(x + self.scroll_columns, y + self.scroll_lines, add_selection);
+        self.set_cursor_pos(
+            x + self.scroll_columns,
+            y + self.scroll_lines,
+            add_selection,
+        );
     }
 
     /// set the right scrolling values so the text stays in frame
@@ -676,9 +926,9 @@ impl Highlight {
     pub fn get_color_background_crossterm(self) -> Color {
         match self {
             Self::Text => Color::Reset,
-            Self::Selection => Color::Grey,
+            Self::Selection => Color::Cyan,
             Self::Gutter => Color::Reset,
-            Self::Status => Color::White,
+            Self::Status => Color::Grey,
         }
     }
 }
@@ -922,10 +1172,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
         let mut buffer = ColoredString::with_capacity(width * height);
 
         // selection range, empty if none exists
-        let selection_range = self
-            .selection
-            .map(|(start, end)| start..end)
-            .unwrap_or(0..0);
+        let selection_range = self.get_selection_range().unwrap_or(0..0);
 
         // go over all lines in the buffer
         for line_num in self.scroll_lines..self.scroll_lines + height {
@@ -996,6 +1243,63 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
     }
 }
 
+/// setup the terminal
+pub fn setup_terminal() {
+    // set panic hook
+    std::panic::set_hook(Box::new(|info| {
+        // clean up the terminal
+        cleanup_terminal("Panic!");
+
+        // pring panic info, if any
+        if let Some(msg) = info.payload().downcast_ref::<&str>() {
+            println!("Cause: {:?}", msg);
+        }
+
+        if let Some(loc) = info.location() {
+            println!("Location: {}", loc);
+        }
+    }));
+
+    // set raw mode
+    terminal::enable_raw_mode().unwrap();
+
+    execute!(
+        stdout(),
+        // so it can be restored
+        cursor::SavePosition,
+        // so it won't clutter other activities
+        terminal::EnterAlternateScreen,
+        // allow mouse usage
+        EnableMouseCapture,
+        // change cursor to a bar, as that's more clear
+        cursor::SetCursorShape(CursorShape::Line),
+    )
+    .unwrap();
+}
+
+/// clean up the terminal
+pub fn cleanup_terminal(message: &str) {
+    execute!(
+        stdout(),
+        // go back to the normal screen
+        terminal::LeaveAlternateScreen,
+        // disable mouse
+        DisableMouseCapture,
+        // restore old cursor position
+        cursor::RestorePosition,
+        // restore cursor style
+        cursor::SetCursorShape(CursorShape::Block),
+        // restore visibility
+        cursor::Show,
+    )
+    .unwrap();
+
+    // leave raw mode
+    terminal::disable_raw_mode().unwrap();
+
+    println!("{}", message);
+}
+
 /// render the editor to a buffer
 pub fn render_editor_to_buffer(
     editor: &TextEditor<TermLineLayoutSettings>,
@@ -1011,10 +1315,15 @@ pub fn render_editor_to_buffer(
     );
 
     let status_line = format!(
-        " {} {}:{}",
+        " {}{} {}:{}",
         filename,
+        if editor.has_changed_since_save() {
+            "*"
+        } else {
+            ""
+        },
         editor.get_row_and_column().0 + 1,
-        editor.get_row_and_column().1 + 1
+        editor.get_row_and_column().1 + 1,
     );
 
     // cursor position
@@ -1141,68 +1450,22 @@ pub fn render(
     stdout().flush().unwrap();
 }
 
-fn terminal_main(file_path: OsString) {
-    // get the file
-    let file_content = match std::fs::read_to_string(&file_path) {
-        Ok(x) => x,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            println!("Failed to open file: {:?}", e);
-            return;
-        }
-    };
-
-    // set panic hook
-    std::panic::set_hook(Box::new(|info| {
-        // return to normal mode
-        execute!(
-            stdout(),
-            terminal::LeaveAlternateScreen,
-            style::ResetColor,
-            cursor::MoveTo(0, terminal::size().unwrap().1),
-            DisableMouseCapture,
-            cursor::RestorePosition
-        )
-        .unwrap();
-        terminal::disable_raw_mode().unwrap();
-
-        // panic message
-        println!("panic!");
-
-        if let Some(msg) = info.payload().downcast_ref::<&str>() {
-            println!("Cause: {:?}", msg);
-        }
-
-        if let Some(loc) = info.location() {
-            println!("Location: {}", loc);
-        }
-    }));
-
-    // set mode
-    terminal::enable_raw_mode().unwrap();
-
-    execute!(
-        stdout(),
-        cursor::SavePosition,
-        terminal::EnterAlternateScreen,
-        terminal::Clear(terminal::ClearType::Purge),
-        cursor::MoveTo(0, 0),
-        EnableMouseCapture,
-    )
-    .unwrap();
+fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) {
+    // set up the terminal
+    setup_terminal();
 
     // state
     let (mut width, mut height) = terminal::size().unwrap();
 
     // editor
-    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {});
+    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {}, newly_loaded);
 
     // draw beforehand
     let (mut current_buffer, cursor_position) = render_editor_to_buffer(
         &editor,
         width as usize,
         height as usize,
-        &file_path.to_string_lossy(),
+        &save_path.to_string_lossy(),
     );
 
     // and render to the terminal
@@ -1230,7 +1493,7 @@ fn terminal_main(file_path: OsString) {
                         &editor,
                         width as usize,
                         height as usize,
-                        &file_path.to_string_lossy(),
+                        &save_path.to_string_lossy(),
                     );
 
                     // and render to the terminal
@@ -1256,7 +1519,16 @@ fn terminal_main(file_path: OsString) {
                         let string = editor.to_string();
 
                         // save, or create the file if it doesn't exists
-                        std::fs::write(file_path.as_os_str(), string).ok();
+                        std::fs::write(save_path.as_os_str(), string).ok();
+
+                        // remember the save
+                        editor.set_saved();
+                    }
+                    // undo/redo
+                    else if code == KeyCode::Char('z') && modifiers == KeyModifiers::CONTROL {
+                        editor.undo();
+                    } else if code == KeyCode::Char('y') && modifiers == KeyModifiers::CONTROL {
+                        editor.redo();
                     }
                     // move cursor
                     else if code == KeyCode::Up {
@@ -1274,7 +1546,7 @@ fn terminal_main(file_path: OsString) {
                     }
                     // insert text
                     else if let KeyCode::Char(c) = code {
-                        editor.insert_character(c);
+                        editor.insert_character(c, true);
                     } else if code == KeyCode::Enter {
                         editor.insert_newline();
                     }
@@ -1294,7 +1566,7 @@ fn terminal_main(file_path: OsString) {
                         &editor,
                         width as usize,
                         height as usize,
-                        &file_path.to_string_lossy(),
+                        &save_path.to_string_lossy(),
                     );
 
                     // and render to the terminal
@@ -1320,7 +1592,7 @@ fn terminal_main(file_path: OsString) {
                         &editor,
                         width as usize,
                         height as usize,
-                        &file_path.to_string_lossy(),
+                        &save_path.to_string_lossy(),
                     );
 
                     // and render to the terminal
@@ -1336,28 +1608,12 @@ fn terminal_main(file_path: OsString) {
         }
     }
 
-    // reset mode
-    execute!(
-        stdout(),
-        terminal::LeaveAlternateScreen,
-        cursor::MoveTo(0, terminal::size().unwrap().1),
-        DisableMouseCapture,
-        cursor::RestorePosition,
-    )
-    .unwrap();
-    terminal::disable_raw_mode().unwrap();
-
-    println!("Done");
+    // cleanup terminal
+    cleanup_terminal("Done");
 }
 
 // gui ===============================================================
-fn gui_main(file_path: OsString) {
-    // get the file
-    let Ok(file_content) = std::fs::read_to_string(&file_path) else {
-        println!("Failed to open file");
-        return;
-    };
-
+fn gui_main(file_content: String, newly_loaded: bool, save_path: OsString) {
     // make a font
     let font_data = include_bytes!("fira-code.ttf");
     let font = FontRef::from_index(font_data, 0).unwrap();
@@ -1369,7 +1625,7 @@ fn gui_main(file_path: OsString) {
     // make the font layout settings
 
     // make the editor
-    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {});
+    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {}, newly_loaded);
 
     // start the  window
     let mut window = Window::new(
@@ -1417,9 +1673,19 @@ fn main() {
     // parse arguments
     let args = Args::parse();
 
-    if args.gui {
-        gui_main(args.file_path)
-    } else {
-        terminal_main(args.file_path)
+    // get the file
+    let (file_content, newly_loaded) = match std::fs::read_to_string(&args.file_path) {
+        Ok(x) => (x, false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), true),
+        Err(e) => {
+            println!("Failed to open file: {:?}", e);
+            return;
+        }
     };
+
+    if args.gui {
+        gui_main(file_content, newly_loaded, args.file_path);
+    } else {
+        terminal_main(file_content, newly_loaded, args.file_path);
+    }
 }
