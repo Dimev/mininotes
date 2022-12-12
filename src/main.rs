@@ -206,6 +206,7 @@ impl<'a> Iterator for TermLineLayout<'a> {
 // editor ====================================================
 
 /// undo/redo action
+// TODO: better way of tracking when actions start/end
 #[derive(Debug, Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EditorAction {
     /// delete a character at this character index
@@ -298,12 +299,12 @@ impl<L: LineLayout> TextEditor<L> {
         todo!();
     }
 
-    /// undo a changei
-    // TODO: Still slightly breaks when doing undo followed by redo
+    /// undo a change
     pub fn undo(&mut self) {
         // can only undo if we have history
         while self.current_history > 0 {
-            // we move backward
+            // move backward in the history
+            // we should be at the end of the history, or at an action start 
             self.current_history -= 1;
 
             // get the current change
@@ -313,13 +314,13 @@ impl<L: LineLayout> TextEditor<L> {
             match change {
                 EditorAction::Delete(cursor, character, before) => {
                     // insert the character
-                    self.text.insert_char(cursor, character);
+                    self.text.insert_char(self.cursor, character);
 
                     // restore cursor
                     self.cursor = self.text.char_to_byte(cursor);
 
                     // restore it properly, if needed
-                    if before {
+                    if !before {
                         self.cursor = move_grapheme(1, self.cursor, self.text.slice(..))
                     }
                 }
@@ -342,11 +343,17 @@ impl<L: LineLayout> TextEditor<L> {
     pub fn redo(&mut self) {
         // can only redo if we're not at the end of history
         while self.history.len() > self.current_history {
+            // move forward in history
+            // we should be at an action start, and can thus safely move forward
+            self.current_history += 1;
+
+            // stop early if we are now at the end of the history
+            if self.history.len() <= self.current_history {
+                break;
+            }
+            
             // get the change
             let change = self.history[self.current_history];
-
-            // we move one forward
-            self.current_history += 1;
 
             // and redo the change
             match change {
@@ -541,7 +548,7 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// insert a newline
     /// also inserts all spaces preceeding the current line, up to the cursor position
-    pub fn insert_newline(&mut self) {
+    pub fn insert_newline(&mut self, start_change: bool) {
         // get the line we are currently on
         let line_num = self.text.byte_to_line(self.cursor);
 
@@ -561,11 +568,8 @@ impl<L: LineLayout> TextEditor<L> {
             .take(line_char_pos - line_char_start)
             .collect::<String>();
 
-        // store the change
-        self.start_change();
-
         // insert a newline
-        self.insert_character('\n', false);
+        self.insert_character('\n', start_change);
 
         // append the extra whitespaces
         self.insert_string(&pred_whitespace, false);
@@ -573,6 +577,7 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// remove a character at the cursor.
     /// before means remove it before the cursor, same as backspace
+    // TODO: use remove_range instead
     pub fn remove_character(&mut self, before: bool) {
         // this happens anyway
         self.start_change();
@@ -619,7 +624,36 @@ impl<L: LineLayout> TextEditor<L> {
         }
     }
 
-    // TODO: remove a range of characters
+    /// remove a range of characters, in bytes, start..end
+    /// before indicates whether the cursor was in front or behind when removing the characters
+    /// assumes that the range is in correct graphemes
+    pub fn remove_range(&mut self, start: usize, end: usize, before: bool, start_change: bool) {
+        // convert to chars
+        let start_char = self.text.byte_to_char(start);
+        let end_char = self.text.byte_to_char(end);
+
+        // start the change if needed
+        if start_change {
+            self.start_change();
+        }
+
+        // go over the characters in the slice and mark them as removed
+        for char_idx in start_char..end_char {
+            self.do_change(EditorAction::Delete(start, self.text.char(char_idx), before));
+        }
+
+        // remove the slice
+        self.text.remove(start_char..end_char);
+
+        // fix cursor
+        if self.cursor >= start && self.cursor < end {
+            // inside, so move it to the start
+            self.cursor = start;
+        } else if self.cursor >= start {
+            // after the end, so move it over the right amount of bytes
+            self.cursor -= end - start;
+        }
+    }
 
     /// move the cursor to a specific column, assuming a terminal program
     pub fn move_cursor_to_column(&mut self, column: usize, add_selection: bool, save_column: bool) {
@@ -1548,7 +1582,7 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                     else if let KeyCode::Char(c) = code {
                         editor.insert_character(c, true);
                     } else if code == KeyCode::Enter {
-                        editor.insert_newline();
+                        editor.insert_newline(true);
                     }
                     // remove text
                     else if code == KeyCode::Backspace {
