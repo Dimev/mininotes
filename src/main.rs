@@ -209,7 +209,7 @@ impl<'a> Iterator for TermLineLayout<'a> {
 // TODO: better way of tracking when actions start/end
 // TODO: this basically means instead of single chars, just store full strings
 // then also change all insert operations to use full strings instead, as this is easier
-// TODO: Just make this be Vec<Action(Vec<Insert/Remove>)> 
+// TODO: Just make this be Vec<Action(Vec<Insert/Remove>)>
 #[derive(Debug, Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EditorAction {
     /// delete a character at this character index
@@ -307,7 +307,7 @@ impl<L: LineLayout> TextEditor<L> {
         // can only undo if we have history
         while self.current_history > 0 {
             // move backward in the history
-            // we should be at the end of the history, or at an action start 
+            // we should be at the end of the history, or at an action start
             self.current_history -= 1;
 
             // get the current change
@@ -354,7 +354,7 @@ impl<L: LineLayout> TextEditor<L> {
             if self.history.len() <= self.current_history {
                 break;
             }
-            
+
             // get the change
             let change = self.history[self.current_history];
 
@@ -504,7 +504,7 @@ impl<L: LineLayout> TextEditor<L> {
         // move horizontally until we are at the target
         self.move_cursor_to_column(self.target_column, add_selection, save_column);
     }
-    
+
     // TODO: make insert operations seperate from these functions
     // instead just have remove_range(start byte, end byte) and insert (start byte, string)
     // then have a remove_char and insert_char that simply wraps these 2 functions
@@ -647,7 +647,11 @@ impl<L: LineLayout> TextEditor<L> {
 
         // go over the characters in the slice and mark them as removed
         for char_idx in start_char..end_char {
-            self.do_change(EditorAction::Delete(start, self.text.char(char_idx), before));
+            self.do_change(EditorAction::Delete(
+                start,
+                self.text.char(char_idx),
+                before,
+            ));
         }
 
         // remove the slice
@@ -968,7 +972,7 @@ impl Highlight {
     pub fn get_color_background_crossterm(self) -> Color {
         match self {
             Self::Text => Color::Reset,
-            Self::Selection => Color::Cyan,
+            Self::Selection => Color::Blue,
             Self::Gutter => Color::Reset,
             Self::Status => Color::Grey,
         }
@@ -1239,6 +1243,19 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
 
                     // stop if it's a newline
                     if grapheme.chars().any(|x| is_newline(x)) {
+                        // if there's still room on the line, mark this as selected, if that's the case
+                        if column >= self.scroll_columns
+                            && column + 1 <= self.scroll_columns + width
+                            && selection_range.contains(&(cursor + line_start))
+                        {
+                            // add to the buffer
+                            buffer.push(Char::new(' ', Highlight::Selection));
+
+                            // move over a column
+                            column += 1;
+                        }
+
+                        // and stop, so the rest of the line is empty
                         break;
                     }
 
