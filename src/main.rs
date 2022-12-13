@@ -207,6 +207,9 @@ impl<'a> Iterator for TermLineLayout<'a> {
 
 /// undo/redo action
 // TODO: better way of tracking when actions start/end
+// TODO: this basically means instead of single chars, just store full strings
+// then also change all insert operations to use full strings instead, as this is easier
+// TODO: Just make this be Vec<Action(Vec<Insert/Remove>)> 
 #[derive(Debug, Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EditorAction {
     /// delete a character at this character index
@@ -501,6 +504,11 @@ impl<L: LineLayout> TextEditor<L> {
         // move horizontally until we are at the target
         self.move_cursor_to_column(self.target_column, add_selection, save_column);
     }
+    
+    // TODO: make insert operations seperate from these functions
+    // instead just have remove_range(start byte, end byte) and insert (start byte, string)
+    // then have a remove_char and insert_char that simply wraps these 2 functions
+    // less undo/redo state to manage in that case
 
     /// insert a character
     /// start_change indicates if this a singular action (true) or part of a larger action that needs to be undone (false)
