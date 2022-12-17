@@ -206,23 +206,13 @@ impl<'a> Iterator for TermLineLayout<'a> {
 // editor ====================================================
 
 /// undo/redo action
-// TODO: better way of tracking when actions start/end
-// TODO: this basically means instead of single chars, just store full strings
-// then also change all insert operations to use full strings instead, as this is easier
-// TODO: Just make this be Vec<Action(Vec<Insert/Remove>)>
-#[derive(Debug, Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EditorAction {
-    /// delete a character at this character index
-    /// remove(cursor..=cursor) in ropey
-    Delete(usize, char, bool),
+    /// delete a string at the character index
+    Delete(usize, String),
 
-    /// insert a character at this character index
-    /// insert_char(cursor, char) in ropey
-    Insert(usize, char),
-
-    /// indicator for the start of a new action
-    /// actions MUST always be 1 or more Delete/Insert long
-    ActionStart,
+    /// insert a string at the character index
+    Insert(usize, String),
 }
 
 /// multiline text editor
@@ -299,44 +289,50 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// discards all changes since the save
     pub fn discard_changes(&mut self) {
-        todo!();
+        // undo until we reach the save point
+        while self
+            .save_anchor
+            .map(|x| self.current_history > x)
+            .unwrap_or(false)
+        {
+            self.undo();
+        }
+
+        // redo until we reach the save point
+        while self
+            .save_anchor
+            .map(|x| self.current_history < x)
+            .unwrap_or(false)
+        {
+            self.redo();
+        }
     }
 
     /// undo a change
     pub fn undo(&mut self) {
         // can only undo if we have history
-        while self.current_history > 0 {
+        if self.current_history > 0 {
             // move backward in the history
-            // we should be at the end of the history, or at an action start
             self.current_history -= 1;
 
             // get the current change
-            let change = self.history[self.current_history];
+            let change = self.history[self.current_history].clone();
 
             // and undo the change
             match change {
-                EditorAction::Delete(cursor, character, before) => {
-                    // insert the character
-                    self.text.insert_char(self.cursor, character);
+                EditorAction::Delete(cursor, string) => {
+                    // insert the string again
+                    self.insert_string(cursor, &string, false);
+
+                    // restore cursor, behind the inserted string
+                    self.cursor = cursor + string.len();
+                }
+                EditorAction::Insert(cursor, string) => {
+                    // remove the range
+                    self.remove_range(cursor, cursor + string.len(), false);
 
                     // restore cursor
-                    self.cursor = self.text.char_to_byte(cursor);
-
-                    // restore it properly, if needed
-                    if !before {
-                        self.cursor = move_grapheme(1, self.cursor, self.text.slice(..))
-                    }
-                }
-                EditorAction::Insert(cursor, _) => {
-                    // delete the character
-                    self.text.remove(cursor..=cursor);
-
-                    // restore cursor
-                    self.cursor = self.text.char_to_byte(cursor);
-                }
-                EditorAction::ActionStart => {
-                    // stop
-                    break;
+                    self.cursor = cursor;
                 }
             }
         }
@@ -345,41 +341,28 @@ impl<L: LineLayout> TextEditor<L> {
     /// redo a change
     pub fn redo(&mut self) {
         // can only redo if we're not at the end of history
-        while self.history.len() > self.current_history {
-            // move forward in history
-            // we should be at an action start, and can thus safely move forward
-            self.current_history += 1;
-
-            // stop early if we are now at the end of the history
-            if self.history.len() <= self.current_history {
-                break;
-            }
-
+        if self.history.len() > self.current_history {
             // get the change
-            let change = self.history[self.current_history];
+            let change = self.history[self.current_history].clone();
+
+            // move forward
+            self.current_history += 1;
 
             // and redo the change
             match change {
-                EditorAction::Insert(cursor, character) => {
-                    // insert the character
-                    self.text.insert_char(cursor, character);
+                EditorAction::Insert(cursor, string) => {
+                    // insert the text
+                    self.insert_string(cursor, &string, false);
+
+                    // restore cursor, behind the inserted string
+                    self.cursor = cursor + string.len();
+                }
+                EditorAction::Delete(cursor, string) => {
+                    // delete the range
+                    self.remove_range(cursor, cursor + string.len(), false);
 
                     // restore cursor
-                    self.cursor = self.text.char_to_byte(cursor);
-
-                    // restore it properly
-                    self.cursor = move_grapheme(1, self.cursor, self.text.slice(..));
-                }
-                EditorAction::Delete(cursor, _, _) => {
-                    // delete the character
-                    self.text.remove(cursor..=cursor);
-
-                    // restore cursor
-                    self.cursor = self.text.char_to_byte(cursor);
-                }
-                EditorAction::ActionStart => {
-                    // stop
-                    break;
+                    self.cursor = cursor;
                 }
             }
         }
@@ -399,18 +382,10 @@ impl<L: LineLayout> TextEditor<L> {
         self.current_history += 1;
 
         // purge end of the queue if it's too long
-        // if the queue is small enough, only stop once we find an action start, to avoid undoing partial actions
-        // ensure that our save anchor and current point in the history remain in the history however
+        // make sure that the save anchor and current point in history remain in the history however
         while self.current_history > 0
             && self.save_anchor.map(|x| x > 0).unwrap_or(true)
-            && if self.history.len() > self.history_size {
-                true
-            } else {
-                self.history
-                    .front()
-                    .map(|x| x != &EditorAction::ActionStart)
-                    .unwrap_or(false)
-            }
+            && self.history.len() > self.history_size
         {
             // move these back
             self.current_history -= 1;
@@ -421,25 +396,35 @@ impl<L: LineLayout> TextEditor<L> {
         }
     }
 
-    /// insert the start of an action that can be undone
-    pub fn start_change(&mut self) {
-        // just insert a marker
-        self.do_change(EditorAction::ActionStart);
-    }
-
     /// clear the selection, unselect text, don't edit it
     pub fn clear_selection(&mut self) {
         self.selection_anchor = None;
     }
 
-    /// get the current selection
-    pub fn get_selection(&self) -> RopeSlice {
-        todo!()
+    /// get the current selection, if any
+    pub fn get_selection(&self) -> Option<String> {
+        // get the selection range, convert it to char indices, and get it from the text
+        self.get_selection_range()
+            .map(|range| self.text.byte_to_char(range.start)..self.text.byte_to_char(range.end))
+            .map(|range| self.text.slice(range).to_string())
     }
 
-    /// remove the selection
-    pub fn cut_selection(&mut self) {
-        todo!()
+    /// remove the current selection, and return it, if any
+    pub fn cut_selection(&mut self) -> Option<String> {
+        // get the selection range, if any
+        let range = self.get_selection_range()?;
+
+        // get the text inside it, in the proper character range
+        let string = self
+            .text
+            .slice(self.text.byte_to_char(range.start)..self.text.byte_to_char(range.end))
+            .to_string();
+
+        // and remove it
+        self.remove_range(range.start, range.end, true);
+
+        // and return
+        Some(string)
     }
 
     /// get the selection range
@@ -505,27 +490,15 @@ impl<L: LineLayout> TextEditor<L> {
         self.move_cursor_to_column(self.target_column, add_selection, save_column);
     }
 
-    // TODO: make insert operations seperate from these functions
-    // instead just have remove_range(start byte, end byte) and insert (start byte, string)
-    // then have a remove_char and insert_char that simply wraps these 2 functions
-    // less undo/redo state to manage in that case
-
     /// insert a character
     /// start_change indicates if this a singular action (true) or part of a larger action that needs to be undone (false)
-    pub fn insert_character(&mut self, character: char, start_change: bool) {
-        // position
-        let char_pos = self.text.byte_to_char(self.cursor);
+    pub fn insert_character_at_cursor(&mut self, character: char) {
+        // get the string to insert
+        let mut buffer = [0 as u8; 4];
+        let string = character.encode_utf8(&mut buffer);
 
-        // insert
-        self.text.insert_char(char_pos, character);
-
-        // save to history
-        if start_change {
-            self.start_change();
-        }
-
-        // actually store the change
-        self.do_change(EditorAction::Insert(char_pos, character));
+        // insert the string
+        self.insert_string(self.cursor, string, true);
 
         // move the cursor over
         self.move_cursor_horizontal(1, false, true);
@@ -533,22 +506,9 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// insert a string
     /// start_change indicates if this is a singular action (true) or part of a larger action that needs to be undone (false)
-    pub fn insert_string(&mut self, string: &str, start_change: bool) {
-        // get the start position
-        let char_pos = self.text.byte_to_char(self.cursor);
-
-        // insert
-        self.text.insert(char_pos, string);
-
-        // save to history
-        if start_change {
-            self.start_change();
-        }
-
-        // actually store the change
-        for (idx, character) in string.chars().enumerate() {
-            self.do_change(EditorAction::Insert(char_pos + idx, character));
-        }
+    pub fn insert_string_at_cursor(&mut self, string: &str) {
+        // insert the string
+        self.insert_string(self.cursor, string, true);
 
         // move the cursor over
         self.move_cursor_horizontal(string.graphemes(true).count() as isize, false, true);
@@ -556,7 +516,7 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// insert a newline
     /// also inserts all spaces preceeding the current line, up to the cursor position
-    pub fn insert_newline(&mut self, start_change: bool) {
+    pub fn insert_newline_at_cursor(&mut self) {
         // get the line we are currently on
         let line_num = self.text.byte_to_line(self.cursor);
 
@@ -573,96 +533,86 @@ impl<L: LineLayout> TextEditor<L> {
         let pred_whitespace = line
             .chars()
             .take_while(|x| x.is_whitespace() && !is_newline(*x))
-            .take(line_char_pos - line_char_start)
-            .collect::<String>();
+            .take(line_char_pos - line_char_start);
 
-        // insert a newline
-        self.insert_character('\n', start_change);
+        // chain that with a newline
+        let string = "\n".chars().chain(pred_whitespace).collect::<String>();
 
-        // append the extra whitespaces
-        self.insert_string(&pred_whitespace, false);
+        // insert the string, with the added whitespace
+        self.insert_string(self.cursor, &string, true);
+
+        // fix the cursor to go behind the string
+        self.cursor += string.len();
     }
 
     /// remove a character at the cursor.
-    /// before means remove it before the cursor, same as backspace
-    // TODO: use remove_range instead
-    pub fn remove_character(&mut self, before: bool) {
-        // this happens anyway
-        self.start_change();
+    /// before means remove it before the cursor, wich is what would be expected if a character was removed with backspace
+    pub fn remove_character_at_cursor(&mut self, before: bool) {
+        // get where the "end" of the character range is
+        let end_range = move_grapheme(
+            if before { -1 } else { 1 },
+            self.cursor,
+            self.text.slice(..),
+        );
 
-        // this differs a bit whether the character before or after needs to be removed
-        if before {
-            // end of the character to remove
-            let end = self.text.byte_to_char(self.cursor);
-
-            // move back
-            self.move_cursor_horizontal(-1, false, true);
-
-            // we are now at the start
-            let start = self.text.byte_to_char(self.cursor);
-
-            // save to history, need to save to a vec first to avoid borrowing the text mutably while also doing do change
-            for character in self.text.slice(start..end).chars().collect::<Vec<char>>() {
-                self.do_change(EditorAction::Delete(start, character, before));
-            }
-
-            // remove it
-            self.text.remove(start..end);
+        // get the byte start and end range
+        let (start, end) = if before {
+            (end_range, self.cursor)
         } else {
-            // start of the character to remove
-            let start_byte = self.cursor;
-            let start = self.text.byte_to_char(start_byte);
+            (self.cursor, end_range)
+        };
 
-            // move forward
-            self.move_cursor_horizontal(1, false, true);
+        // remove it
+        self.remove_range(start, end, true);
+    }
 
-            // we are now at the end
-            let end = self.text.byte_to_char(self.cursor);
+    /// insert a string of characters, at the start byte indicated
+    /// assumes that start points at a correct grapheme boundary
+    /// record indicates whether or not to record this action in the history
+    pub fn insert_string(&mut self, start: usize, string: &str, record: bool) {
+        // get the start position in chars
+        let start_char = self.text.byte_to_char(start);
 
-            // restore position
-            self.cursor = start_byte;
+        // insert the text
+        self.text.insert(start_char, string);
 
-            // save to history
-            for character in self.text.slice(start..end).chars().collect::<Vec<char>>() {
-                self.do_change(EditorAction::Delete(start, character, before));
-            }
+        // insert the change
+        if record {
+            self.do_change(EditorAction::Insert(start, string.to_string()));
+        }
 
-            // remove the next character
-            self.text.remove(start..end);
+        // fix cursor
+        if self.cursor > start {
+            // after the range, so move it over the right amount of bytes to compensate for the added range
+            self.cursor += string.len();
         }
     }
 
     /// remove a range of characters, in bytes, start..end
-    /// before indicates whether the cursor was in front or behind when removing the characters
     /// assumes that the range is in correct graphemes
-    pub fn remove_range(&mut self, start: usize, end: usize, before: bool, start_change: bool) {
-        // convert to chars
+    /// record indicates whether or not to record this action in the history
+    pub fn remove_range(&mut self, start: usize, end: usize, record: bool) {
+        // find the start and end range in chars
         let start_char = self.text.byte_to_char(start);
         let end_char = self.text.byte_to_char(end);
 
-        // start the change if needed
-        if start_change {
-            self.start_change();
-        }
-
-        // go over the characters in the slice and mark them as removed
-        for char_idx in start_char..end_char {
-            self.do_change(EditorAction::Delete(
-                start,
-                self.text.char(char_idx),
-                before,
-            ));
-        }
+        // find the slice we are going to remove
+        let string = self.text.slice(start_char..end_char).to_string();
 
         // remove the slice
         self.text.remove(start_char..end_char);
 
+        // insert the change
+        if record {
+            self.do_change(EditorAction::Delete(start, string));
+        }
+
         // fix cursor
         if self.cursor >= start && self.cursor < end {
-            // inside, so move it to the start
+            // inside the range, so move it to the start of the range
             self.cursor = start;
-        } else if self.cursor >= start {
-            // after the end, so move it over the right amount of bytes
+        } else if self.cursor > start {
+            // after the end, so move it over the right amount of bytes to compensate the removed range
             self.cursor -= end - start;
         }
     }
@@ -1519,6 +1469,9 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
     // editor
     let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {}, newly_loaded);
 
+    // clipboard
+    let mut clip = String::new();
+
     // draw beforehand
     let (mut current_buffer, cursor_position) = render_editor_to_buffer(
         &editor,
@@ -1583,11 +1536,32 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                         // remember the save
                         editor.set_saved();
                     }
+                    // discard
+                    else if code == KeyCode::Char('d') && modifiers == KeyModifiers::ALT {
+                        editor.discard_changes();
+                    }
                     // undo/redo
                     else if code == KeyCode::Char('z') && modifiers == KeyModifiers::CONTROL {
                         editor.undo();
                     } else if code == KeyCode::Char('y') && modifiers == KeyModifiers::CONTROL {
                         editor.redo();
+                    }
+                    // copy/paste/cut
+                    else if code == KeyCode::Char('c') && modifiers == KeyModifiers::CONTROL {
+                        // copy, if any
+                        if let Some(x) = editor.get_selection() {
+                            clip = x;
+                        }
+                    } else if code == KeyCode::Char('v') && modifiers == KeyModifiers::CONTROL {
+                        // paste, if the clipboard is not empty
+                        if clip.len() > 0 {
+                            editor.insert_string_at_cursor(&clip);
+                        }
+                    } else if code == KeyCode::Char('x') && modifiers == KeyModifiers::CONTROL {
+                        // cut, if the selection is any
+                        if let Some(x) = editor.cut_selection() {
+                            clip = x;
+                        }
                     }
                     // move cursor
                     else if code == KeyCode::Up {
@@ -1605,15 +1579,15 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                     }
                     // insert text
                     else if let KeyCode::Char(c) = code {
-                        editor.insert_character(c, true);
+                        editor.insert_character_at_cursor(c);
                     } else if code == KeyCode::Enter {
-                        editor.insert_newline(true);
+                        editor.insert_newline_at_cursor();
                     }
                     // remove text
                     else if code == KeyCode::Backspace {
-                        editor.remove_character(true);
+                        editor.remove_character_at_cursor(true);
                     } else if code == KeyCode::Delete {
-                        editor.remove_character(false);
+                        editor.remove_character_at_cursor(false);
                     }
 
                     // fix scrolling before rendering
