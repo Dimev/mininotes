@@ -1210,28 +1210,76 @@ impl<'a> TerminalBuffer for TextLine<'a> {
 
 impl TerminalBuffer for LineNumbers {
     fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
-        // TODO: width/height guarantees
-        assert!(width >= self.width(height), "TODO: uphold width guarantee");
+        // buffer to add to
+        let mut buffer = ColoredString::with_capacity(width * height);
 
-        // TODO: better in general
-        // get the total width of the number
-        let number_padding = self.width_number(height);
+        // figure out the max number padding
+        let padding = self.width_number(height);
 
-        // iterator over the numbered lines
-        let numbered =
-            (self.start + 1..self.total + 1).map(|x| format!(" {:>1$} ", x, number_padding));
+        // lines to show, start and end
+        let start = self.start + 1;
+        let end = (self.start + 1 + height).min(self.total + 1);
 
-        // iterator over the rest of the lines
-        let rest = std::iter::repeat(format!(" {:>1$} ", "~", number_padding));
+        // add the line numbers
+        for line in start..end {
+            // current column
+            let mut column = 1;
 
-        // collect
-        numbered
-            .chain(rest)
-            .take(height)
-            .collect::<String>()
-            .chars()
-            .map(|c| Char::new(c, Highlight::Gutter))
-            .collect()
+            // push starting space
+            if width > 0 {
+                buffer.push(Char::new(' ', Highlight::Gutter));
+            }
+
+            // get the start number
+            let mut base = (10 as usize).pow(padding.saturating_sub(1) as u32);
+
+            // go as long as it's > 0, calculate the number to show
+            while base > 0 && column < width {
+                // see if we need to show a number
+                if line / base > 0 {
+                    // something, get the digit
+                    let digit = (line / base) % 10;
+
+                    // get it as char
+                    let character = char::from_digit(digit as u32, 10).unwrap();
+
+                    // push it
+                    buffer.push(Char::new(character, Highlight::Gutter));
+                } else {
+                    // nothing, show a space
+                    buffer.push(Char::new(' ', Highlight::Gutter));
+                }
+
+                // next base
+                base /= 10;
+
+                // next column
+                column += 1;
+            }
+
+            // push remaining space, if any can fit
+            if column < width {
+                buffer.push(Char::new(' ', Highlight::Gutter));
+            }
+        }
+
+        // and the rest
+        buffer.extend(
+            // generate the ~, over and over
+            std::iter::repeat((0..width).map(|x| {
+                if x == padding {
+                    Char::new('~', Highlight::Gutter)
+                } else {
+                    Char::new(' ', Highlight::Gutter)
+                }
+            }))
+            // for the remaining lines
+            .take(height.saturating_sub(end - start))
+            .flatten(),
+        );
+
+        // return
+        buffer
     }
 }
 
