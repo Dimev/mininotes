@@ -29,6 +29,7 @@ use clap::Parser;
 
 // unicode tools =============================================
 
+// test strings
 // Ｈｅｌｌｏ, ｗｏｒｌｄ!
 // اربك تكست هو اول موقع يسمح لزواره الكرام بتحويل الكتابة العربي الى كتابة مفهومة من قبل اغلب برامج التصميم
 // 👩‍🔬👩🔬
@@ -104,9 +105,12 @@ pub fn string_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
         .sum()
 }
 
-// TODO: all newlines
+/// newline, as recognized by ropey, so either one of line feed, carriage return, vertical tab, form feed, next line, line separator, paragraph separator
 pub fn is_newline(c: char) -> bool {
-    c == '\n'
+    [
+        '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+    ]
+    .contains(&c)
 }
 
 // general layout ===========================================
@@ -133,7 +137,7 @@ pub struct GraphemePosition {
 // terminal layout ===========================================
 
 /// Layout settings, which there are none of
-// TODO: bidir
+// TODO: bidir?
 pub struct TermLineLayoutSettings {}
 
 impl LineLayout for TermLineLayoutSettings {
@@ -370,8 +374,6 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// insert a new, single change
     pub fn do_change(&mut self, change: EditorAction) {
-        // TODO: check if the change we do is the inverse of the last change change done, that way we can remove it and have consistency with some other editors
-
         // purge history after this point
         while self.history.len() > self.current_history {
             self.history.pop_back();
@@ -423,6 +425,9 @@ impl<L: LineLayout> TextEditor<L> {
         // and remove it
         self.remove_range(range.start, range.end, true);
 
+        // remove the selection
+        self.clear_selection();
+
         // and return
         Some(string)
     }
@@ -446,6 +451,17 @@ impl<L: LineLayout> TextEditor<L> {
         }
     }
 
+    /// get the character currently under the cursor
+    pub fn get_character_under_cursor(&self) -> char {
+        self.text.char(self.text.byte_to_char(self.cursor))
+    }
+
+    /// get the character before the curosr, if any
+    pub fn get_character_in_front_of_cursor(&self) -> Option<char> {
+        self.text
+            .get_char(self.text.byte_to_char(self.cursor).checked_sub(1)?)
+    }
+
     /// move cursor horizontally, and save the cursor column if needed
     pub fn move_cursor_horizontal(
         &mut self,
@@ -466,6 +482,51 @@ impl<L: LineLayout> TextEditor<L> {
         // and recalculate the target column
         if save_column {
             self.target_column = self.get_cursor_column();
+        }
+    }
+
+    /// move the cursor horizontally past a word, and save the column if needed
+    pub fn move_cursor_horizontal_words(
+        &mut self,
+        amount: isize,
+        add_selection: bool,
+        save_column: bool,
+    ) {
+        // forward or backward
+        if amount > 0 {
+            // skip past any whitespaces
+            while self.cursor < self.text.len_bytes()
+                && self.get_character_under_cursor().is_whitespace()
+            {
+                self.move_cursor_horizontal(1, add_selection, save_column);
+            }
+
+            // skip past any normal characters
+            while self.cursor < self.text.len_bytes()
+                && !self.get_character_under_cursor().is_whitespace()
+            {
+                self.move_cursor_horizontal(1, add_selection, save_column);
+            }
+        } else {
+            // skip past any whitespaces
+            while self.cursor > 0
+                && self
+                    .get_character_in_front_of_cursor()
+                    .unwrap()
+                    .is_whitespace()
+            {
+                self.move_cursor_horizontal(-1, add_selection, save_column);
+            }
+
+            // skip past any normal characters
+            while self.cursor > 0
+                && !self
+                    .get_character_in_front_of_cursor()
+                    .unwrap()
+                    .is_whitespace()
+            {
+                self.move_cursor_horizontal(-1, add_selection, save_column);
+            }
         }
     }
 
@@ -493,6 +554,9 @@ impl<L: LineLayout> TextEditor<L> {
     /// insert a character
     /// start_change indicates if this a singular action (true) or part of a larger action that needs to be undone (false)
     pub fn insert_character_at_cursor(&mut self, character: char) {
+        // first, remove selection
+        self.cut_selection();
+
         // get the string to insert
         let mut buffer = [0 as u8; 4];
         let string = character.encode_utf8(&mut buffer);
@@ -507,6 +571,9 @@ impl<L: LineLayout> TextEditor<L> {
     /// insert a string
     /// start_change indicates if this is a singular action (true) or part of a larger action that needs to be undone (false)
     pub fn insert_string_at_cursor(&mut self, string: &str) {
+        // first, remove selection
+        self.cut_selection();
+
         // insert the string
         self.insert_string(self.cursor, string, true);
 
@@ -517,6 +584,9 @@ impl<L: LineLayout> TextEditor<L> {
     /// insert a newline
     /// also inserts all spaces preceeding the current line, up to the cursor position
     pub fn insert_newline_at_cursor(&mut self) {
+        // first, remove selection
+        self.cut_selection();
+
         // get the line we are currently on
         let line_num = self.text.byte_to_line(self.cursor);
 
@@ -545,9 +615,15 @@ impl<L: LineLayout> TextEditor<L> {
         self.cursor += string.len();
     }
 
-    /// remove a character at the cursor.
+    /// remove a character at the cursor, or the selection, if any
     /// before means remove it before the cursor, wich is what would be expected if a character was removed with backspace
-    pub fn remove_character_at_cursor(&mut self, before: bool) {
+    pub fn remove_character_or_selection_at_cursor(&mut self, before: bool) {
+        // remove the selection, if any
+        if self.cut_selection().is_some() {
+            // no need to do anything else
+            return;
+        }
+
         // get where the "end" of the character range is
         let end_range = move_grapheme(
             if before { -1 } else { 1 },
@@ -576,8 +652,8 @@ impl<L: LineLayout> TextEditor<L> {
         // insert the text
         self.text.insert(start_char, string);
 
-        // insert the change
-        if record {
+        // insert the change, if it was anything
+        if record && string.len() > 0 {
             self.do_change(EditorAction::Insert(start, string.to_string()));
         }
 
@@ -602,8 +678,8 @@ impl<L: LineLayout> TextEditor<L> {
         // remove the slice
         self.text.remove(start_char..end_char);
 
-        // insert the change
-        if record {
+        // insert the change, if it was anything
+        if record && string.len() > 0 {
             self.do_change(EditorAction::Delete(start, string));
         }
 
@@ -1116,7 +1192,6 @@ impl<'a> TextLine<'a> {
 impl<'a> TerminalBuffer for TextLine<'a> {
     fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // simply add extra padding
-        // TODO: wrapping?
         self.string
             .chars()
             .chain(std::iter::repeat(' '))
@@ -1568,6 +1643,18 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                         editor.move_cursor_vertical(-1, modifiers == KeyModifiers::SHIFT, false);
                     } else if code == KeyCode::Down {
                         editor.move_cursor_vertical(1, modifiers == KeyModifiers::SHIFT, false);
+                    } else if code == KeyCode::Left && modifiers.contains(KeyModifiers::CONTROL) {
+                        editor.move_cursor_horizontal_words(
+                            -1,
+                            modifiers.contains(KeyModifiers::SHIFT),
+                            true,
+                        );
+                    } else if code == KeyCode::Right && modifiers.contains(KeyModifiers::CONTROL) {
+                        editor.move_cursor_horizontal_words(
+                            1,
+                            modifiers.contains(KeyModifiers::SHIFT),
+                            true,
+                        );
                     } else if code == KeyCode::Left {
                         editor.move_cursor_horizontal(-1, modifiers == KeyModifiers::SHIFT, true);
                     } else if code == KeyCode::Right {
@@ -1585,9 +1672,9 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                     }
                     // remove text
                     else if code == KeyCode::Backspace {
-                        editor.remove_character_at_cursor(true);
+                        editor.remove_character_or_selection_at_cursor(true);
                     } else if code == KeyCode::Delete {
-                        editor.remove_character_at_cursor(false);
+                        editor.remove_character_or_selection_at_cursor(false);
                     }
 
                     // fix scrolling before rendering

@@ -13,9 +13,9 @@ Current goals:
  - mouse to cursor position - ~ doesn't properly alighn with the true UI layout.
  - undo/redo - ~ need to fix bugs and make it detect manual undo/redo
  - selection - V
- - copy/pase
+ - copy/pase - V
  - pageup/pagedown scroll
- - skip words navigation
+ - skip words navigation - V
  - clean up code
  
 Maybe goals:
