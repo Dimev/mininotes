@@ -11,7 +11,7 @@ Current goals:
  - status bar - V
  - loading and saving - ~ saving new files doesn't always create the right path
  - mouse to cursor position - ~ doesn't properly alighn with the true UI layout.
- - undo/redo - ~ need to fix bugs and make it detect manual undo/redo
+ - undo/redo - V
  - selection - V
  - copy/pase - V
  - pageup/pagedown scroll
