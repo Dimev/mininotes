@@ -1006,19 +1006,18 @@ impl Highlight {
 }
 
 // ui layout/terminal drawing ===========================
-// TODO: move this around a bit
-
-// TODO: better layout functionality
-// this should also work when using the gui
-// having a way to capture events here would also be nice
-// besides get_buffer, there should also be handle input, get glyphs, etc
-// as well as size hints
 
 /// terminal rendering trait
 pub trait TerminalBuffer: Sized {
     /// Get the buffer of this size
     /// This has to guarantee the buffer is of this exact size
     fn get_buffer(&self, width: usize, height: usize) -> ColoredString;
+
+    /// preferred width, from a given height
+    fn preferred_width(&self, height: usize) -> Option<usize>;
+
+    /// preferred height, from a given width
+    fn preferred_height(&self, width: usize) -> Option<usize>;
 
     /// Compose a buffer to the other side
     fn left_of<'a, T: TerminalBuffer>(
@@ -1076,9 +1075,12 @@ pub trait TerminalBuffer: Sized {
 /// mode on how to treat split layout
 #[derive(Copy, Clone)]
 pub enum SplitMode {
-    // TODO: inferred left and right
-    // this uses the preferred with and height, if any, otherwise split by half
-    // TODO: left or right only, to (not) show things when not needed
+    /// Uses the preferred size of the left panel, or split halfway through the middle otherwise
+    PreferLeft,
+
+    /// Uses the preferred size of the right panel, or split halfway through the middle otherwise
+    PreferRight,
+
     /// Show based on a split ratio, 0-1
     Ratio(f32),
 
@@ -1090,11 +1092,33 @@ pub enum SplitMode {
 }
 
 impl SplitMode {
+    /// reverses the split mode, so you can swap the arguments
     pub fn reverse(self) -> Self {
         match self {
             Self::Ratio(x) => Self::Ratio(1.0 - x),
             Self::ExactLeft(x) => Self::ExactRight(x),
             Self::ExactRight(x) => Self::ExactLeft(x),
+            Self::PreferLeft => Self::PreferRight,
+            Self::PreferRight => Self::PreferLeft,
+        }
+    }
+
+    /// returns the calculated split value
+    pub fn get_split(
+        self,
+        total: usize,
+        preferrred_left: Option<usize>,
+        preferred_right: Option<usize>,
+    ) -> usize {
+        match self {
+            SplitMode::Ratio(x) => ((total as f32 * x) as usize).min(total),
+            SplitMode::ExactLeft(x) => x.min(total),
+            SplitMode::ExactRight(x) => total.saturating_sub(x),
+            SplitMode::PreferLeft => preferrred_left.unwrap_or(total / 2).min(total),
+            SplitMode::PreferRight => preferred_right
+                .map(|x| total.saturating_sub(x))
+                .unwrap_or(total / 2)
+                .min(total),
         }
     }
 }
@@ -1112,11 +1136,11 @@ pub struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
 impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane<'a, L, R> {
     fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // figure out the correct split
-        let split = match self.mode {
-            SplitMode::Ratio(x) => (height as f32 * x) as usize,
-            SplitMode::ExactLeft(x) => x.min(height),
-            SplitMode::ExactRight(x) => height.saturating_sub(x),
-        };
+        let split = self.mode.get_split(
+            height,
+            self.top.preferred_height(width),
+            self.bottom.preferred_height(width),
+        );
 
         // get the buffers of the right size
         let top = self.top.get_buffer(width, split);
@@ -1124,6 +1148,26 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane
 
         // and just stitch them together
         top.iter().chain(bottom.iter()).copied().collect()
+    }
+
+    fn preferred_width(&self, height: usize) -> Option<usize> {
+        match self.mode {
+            SplitMode::PreferLeft => self.top.preferred_width(height),
+            SplitMode::PreferRight => self.bottom.preferred_width(height),
+            _ => None,
+        }
+    }
+
+    fn preferred_height(&self, width: usize) -> Option<usize> {
+        match self.mode {
+            // prefer the sum of both heights
+            SplitMode::PreferLeft | SplitMode::PreferRight => self
+                .top
+                .preferred_height(width)
+                .map(|x| self.bottom.preferred_height(width).map(|y| x.max(y)))
+                .flatten(),
+            _ => None,
+        }
     }
 }
 
@@ -1138,11 +1182,11 @@ pub struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
 impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'a, L, R> {
     fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // figure out the correct split
-        let split = match self.mode {
-            SplitMode::Ratio(x) => (width as f32 * x) as usize,
-            SplitMode::ExactLeft(x) => x.min(width),
-            SplitMode::ExactRight(x) => width.saturating_sub(x),
-        };
+        let split = self.mode.get_split(
+            width,
+            self.left.preferred_width(height),
+            self.right.preferred_width(height),
+        );
 
         // get the buffers
         let left = self.left.get_buffer(split, height);
@@ -1177,6 +1221,26 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'
 
         buffer
     }
+
+    fn preferred_height(&self, width: usize) -> Option<usize> {
+        match self.mode {
+            SplitMode::PreferLeft => self.left.preferred_height(width),
+            SplitMode::PreferRight => self.right.preferred_height(width),
+            _ => None,
+        }
+    }
+
+    fn preferred_width(&self, height: usize) -> Option<usize> {
+        match self.mode {
+            // prefer the sum of both widths
+            SplitMode::PreferLeft | SplitMode::PreferRight => self
+                .left
+                .preferred_width(height)
+                .map(|x| self.right.preferred_width(height).map(|y| x.max(y)))
+                .flatten(),
+            _ => None,
+        }
+    }
 }
 
 pub struct TextLine<'a> {
@@ -1206,6 +1270,16 @@ impl<'a> TerminalBuffer for TextLine<'a> {
             .map(|c| Char::new(c, Highlight::Status))
             .collect()
     }
+
+    fn preferred_width(&self, _: usize) -> Option<usize> {
+        // prefer to fit enough on here
+        Some(string_width(self.string.chars()))
+    }
+
+    fn preferred_height(&self, _: usize) -> Option<usize> {
+        // prefer to fit enough on here
+        Some(1)
+    }
 }
 
 impl TerminalBuffer for LineNumbers {
@@ -1216,6 +1290,9 @@ impl TerminalBuffer for LineNumbers {
         // figure out the max number padding
         let padding = self.width_number(height);
 
+        // figure out the number of spaces to pad at the front
+        let space_padding = width.saturating_sub(padding + 1).max(1);
+
         // lines to show, start and end
         let start = self.start + 1;
         let end = (self.start + 1 + height).min(self.total + 1);
@@ -1223,11 +1300,12 @@ impl TerminalBuffer for LineNumbers {
         // add the line numbers
         for line in start..end {
             // current column
-            let mut column = 1;
+            let mut column = 0;
 
             // push starting space
-            if width > 0 {
+            while column < width.min(space_padding) {
                 buffer.push(Char::new(' ', Highlight::Gutter));
+                column += 1;
             }
 
             // get the start number
@@ -1280,6 +1358,16 @@ impl TerminalBuffer for LineNumbers {
 
         // return
         buffer
+    }
+
+    // wide enough to fit our line numbers
+    fn preferred_width(&self, height: usize) -> Option<usize> {
+        Some(self.width(height))
+    }
+
+    // don't prefer
+    fn preferred_height(&self, _: usize) -> Option<usize> {
+        None
     }
 }
 
@@ -1372,6 +1460,15 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
         }
 
         buffer
+    }
+
+    // don't prefer
+    fn preferred_width(&self, _: usize) -> Option<usize> {
+        None
+    }
+
+    fn preferred_height(&self, _: usize) -> Option<usize> {
+        None
     }
 }
 
@@ -1466,8 +1563,8 @@ pub fn render_editor_to_buffer(
     // and simply perform layout
     (
         lines
-            .left_of(&editor, SplitMode::ExactLeft(lines.width(height)))
-            .top_of(&TextLine::new(&status_line), SplitMode::ExactRight(1))
+            .left_of(&editor, SplitMode::PreferLeft)
+            .top_of(&TextLine::new(&status_line), SplitMode::PreferRight)
             .get_buffer(width, height),
         cursor_pos,
     )
