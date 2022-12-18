@@ -7,7 +7,7 @@ Feel free to use this as reference for whatever you want
 
 Current goals:
  - grapheme navigation - V
- - line numbers - ~ no relative yet
+ - line numbers - V
  - status bar - V
  - loading and saving - ~ saving new files doesn't always create the right path
  - mouse to cursor position - ~ doesn't properly alighn with the true UI layout.
