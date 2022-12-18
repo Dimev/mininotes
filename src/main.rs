@@ -894,6 +894,11 @@ impl<L: LineLayout> TextEditor<L> {
     pub fn get_first_visible_line(&self) -> usize {
         self.scroll_lines
     }
+
+    /// get the current line the cursor is on
+    pub fn get_current_line(&self) -> usize {
+        self.text.byte_to_line(self.cursor)
+    }
 }
 
 // line numbers ==========================================
@@ -926,12 +931,31 @@ impl LineNumbers {
 
     /// get how wide this should be
     pub fn width(self, height: usize) -> usize {
-        format!(" {} ", self.total).len()
+        self.width_number(height) + 2
     }
 
     /// how wide the number should be
     pub fn width_number(self, height: usize) -> usize {
-        format!("{}", self.total).len()
+        if self.relative {
+            // get the max difference
+            // number at the top of the range
+            let start = self.current.abs_diff(self.start);
+
+            // number at the end of the range
+            let end = self.current.abs_diff(self.start + height);
+
+            // get the one with the most digits, aka highest
+            let max = start.max(end).max(self.current + 1);
+
+            // figure out the number of digits
+            (max as f64).log10() as usize + 1
+        } else {
+            // just take the max number that can occur on the range
+            let max = self.total.min(self.start + height + 1);
+
+            // number of digits
+            (max as f64).log10() as usize + 1
+        }
     }
 }
 
@@ -1311,12 +1335,20 @@ impl TerminalBuffer for LineNumbers {
             // get the start number
             let mut base = (10 as usize).pow(padding.saturating_sub(1) as u32);
 
+            // get the line number
+            let line_number = if self.relative && line != self.current {
+                // difference if we are not on the same line
+                line.abs_diff(self.current)
+            } else {
+                line
+            };
+
             // go as long as it's > 0, calculate the number to show
             while base > 0 && column < width {
                 // see if we need to show a number
-                if line / base > 0 {
+                if line_number / base > 0 {
                     // something, get the digit
-                    let digit = (line / base) % 10;
+                    let digit = (line_number / base) % 10;
 
                     // get it as char
                     let character = char::from_digit(digit as u32, 10).unwrap();
@@ -1535,12 +1567,13 @@ pub fn render_editor_to_buffer(
     width: usize,
     height: usize,
     filename: &str,
+    relative_line_numbers: bool,
 ) -> (ColoredString, Option<(usize, usize)>) {
     let lines = LineNumbers::new(
         editor.get_first_visible_line(),
         editor.len_lines(),
-        0,
-        false,
+        editor.get_current_line() + 1,
+        relative_line_numbers,
     );
 
     let status_line = format!(
@@ -1679,7 +1712,12 @@ pub fn render(
     stdout().flush().unwrap();
 }
 
-fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) {
+fn terminal_main(
+    file_content: String,
+    newly_loaded: bool,
+    save_path: OsString,
+    relative_line_numbers: bool,
+) {
     // set up the terminal
     setup_terminal();
 
@@ -1698,6 +1736,7 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
         width as usize,
         height as usize,
         &save_path.to_string_lossy(),
+        relative_line_numbers,
     );
 
     // and render to the terminal
@@ -1726,6 +1765,7 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                         width as usize,
                         height as usize,
                         &save_path.to_string_lossy(),
+                        relative_line_numbers,
                     );
 
                     // and render to the terminal
@@ -1832,6 +1872,7 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                         width as usize,
                         height as usize,
                         &save_path.to_string_lossy(),
+                        relative_line_numbers,
                     );
 
                     // and render to the terminal
@@ -1858,6 +1899,7 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
                         width as usize,
                         height as usize,
                         &save_path.to_string_lossy(),
+                        relative_line_numbers,
                     );
 
                     // and render to the terminal
@@ -1878,7 +1920,12 @@ fn terminal_main(file_content: String, newly_loaded: bool, save_path: OsString) 
 }
 
 // gui ===============================================================
-fn gui_main(file_content: String, newly_loaded: bool, save_path: OsString) {
+fn gui_main(
+    file_content: String,
+    newly_loaded: bool,
+    save_path: OsString,
+    relative_line_numbers: bool,
+) {
     // make a font
     let font_data = include_bytes!("fira-code.ttf");
     let font = FontRef::from_index(font_data, 0).unwrap();
@@ -1930,6 +1977,10 @@ struct Args {
     /// whether to run in gui mode
     #[arg(long, short)]
     gui: bool,
+
+    /// whether to use relative line numbers
+    #[arg(long, short)]
+    relative_line_numbers: bool,
 }
 
 // run ==============================================================
@@ -1949,8 +2000,18 @@ fn main() {
     };
 
     if args.gui {
-        gui_main(file_content, newly_loaded, args.file_path);
+        gui_main(
+            file_content,
+            newly_loaded,
+            args.file_path,
+            args.relative_line_numbers,
+        );
     } else {
-        terminal_main(file_content, newly_loaded, args.file_path);
+        terminal_main(
+            file_content,
+            newly_loaded,
+            args.file_path,
+            args.relative_line_numbers,
+        );
     }
 }
