@@ -944,14 +944,10 @@ impl LineNumbers {
     pub fn width_number(self, height: usize) -> usize {
         if self.relative {
             // get the max difference
-            // number at the top of the range
-            let start = self.current.abs_diff(self.start);
-
-            // number at the end of the range
-            let end = self.current.abs_diff(self.start + height);
+            let max_diff = height;
 
             // get the one with the most digits, aka highest
-            let max = start.max(end).max(self.current + 1);
+            let max = max_diff.max(self.total);
 
             // figure out the number of digits
             (max as f64).log10() as usize + 1
