@@ -9,7 +9,7 @@ Current goals:
  - grapheme navigation - V
  - line numbers - V
  - status bar - V
- - loading and saving - ~ saving new files doesn't always create the right path
+ - loading and saving - V
  - mouse to cursor position - ~ doesn't properly alighn with the true UI layout.
  - undo/redo - V
  - selection - V
