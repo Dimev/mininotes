@@ -956,11 +956,8 @@ impl LineNumbers {
             // figure out the number of digits
             (max as f64).log10() as usize + 1
         } else {
-            // just take the max number that can occur on the range
-            let max = self.total.min(self.start + height + 1);
-
             // number of digits
-            (max as f64).log10() as usize + 1
+            (self.total as f64).log10() as usize + 1
         }
     }
 }
