@@ -11,8 +11,11 @@ use crossterm::{
 };
 use swash::FontRef;
 
-use std::io::{stdout, Write};
-use std::{collections::VecDeque, ffi::OsString};
+use std::collections::VecDeque;
+use std::{
+    io::{stdout, Write},
+    path::PathBuf,
+};
 
 // editor deps
 use ropey::{Rope, RopeSlice};
@@ -23,6 +26,9 @@ use std::ops::Range;
 
 // gui deps
 use minifb::{Window, WindowOptions};
+
+// clipboard
+use arboard::Clipboard;
 
 // arg parsing
 use clap::Parser;
@@ -1029,6 +1035,61 @@ impl Highlight {
     }
 }
 
+// ui actions ===========================================
+#[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
+pub enum UiEvent {
+    /// clicked a position
+    Clicked(usize, usize),
+
+    /// dragged from and to a position
+    Dragged(usize, usize, usize, usize),
+
+    /// inserted a character
+    Insert(char),
+
+    /// insert newline
+    InsertNewline,
+
+    /// backspace
+    Backspace,
+
+    /// delete
+    Delete,
+
+    /// undo
+    Undo,
+
+    /// redo
+    Redo,
+
+    /// copy
+    Copy,
+
+    /// paste
+    Paste,
+
+    /// cut
+    Cut,
+
+    /// system clipboard copy
+    SysCopy,
+
+    /// system clipboard paste
+    SysPaste,
+
+    /// system clipboard cut
+    SysCut,
+
+    /// discard changes
+    Discard,
+
+    /// save changes
+    Save,
+
+    /// quit
+    Quit,
+}
+
 // ui layout/terminal drawing ===========================
 
 /// terminal rendering trait
@@ -1715,7 +1776,7 @@ pub fn render(
 fn terminal_main(
     file_content: String,
     newly_loaded: bool,
-    save_path: OsString,
+    save_path: PathBuf,
     relative_line_numbers: bool,
 ) {
     // set up the terminal
@@ -1729,6 +1790,9 @@ fn terminal_main(
 
     // clipboard
     let mut clip = String::new();
+
+    // system clipboard
+    let mut system_clip = Clipboard::new().ok();
 
     // draw beforehand
     let (mut current_buffer, cursor_position) = render_editor_to_buffer(
@@ -1790,11 +1854,13 @@ fn terminal_main(
                     if code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
                         let string = editor.to_string();
 
-                        // save, or create the file if it doesn't exists
-                        std::fs::write(save_path.as_os_str(), string).ok();
-
-                        // remember the save
-                        editor.set_saved();
+                        // ensure all folders exist, then make the file
+                        if std::fs::create_dir_all(save_path.as_path().parent().unwrap()).is_ok()
+                            && std::fs::write(save_path.as_path(), string).is_ok()
+                        {
+                            // indicate we saved, if succeeded
+                            editor.set_saved();
+                        }
                     }
                     // discard
                     else if code == KeyCode::Char('d') && modifiers == KeyModifiers::ALT {
@@ -1821,6 +1887,27 @@ fn terminal_main(
                         // cut, if the selection is any
                         if let Some(x) = editor.cut_selection() {
                             clip = x;
+                        }
+                    }
+                    // system clipboard
+                    else if code == KeyCode::Char('c') && modifiers == KeyModifiers::ALT {
+                        // copy, if any
+                        if let Some(x) = editor.get_selection() {
+                            system_clip.as_mut().map(|y| y.set_text(x));
+                        }
+                    } else if code == KeyCode::Char('v') && modifiers == KeyModifiers::ALT {
+                        // paste, if the clipboard is not empty
+                        if let Some(x) = system_clip.as_mut() {
+                            if let Ok(y) = x.get_text() {
+                                if y.len() > 0 {
+                                    editor.insert_string_at_cursor(&y);
+                                }
+                            }
+                        }
+                    } else if code == KeyCode::Char('x') && modifiers == KeyModifiers::ALT {
+                        // cut, if the selection is any
+                        if let Some(x) = editor.cut_selection() {
+                            system_clip.as_mut().map(|y| y.set_text(x));
                         }
                     }
                     // move cursor
@@ -1923,7 +2010,7 @@ fn terminal_main(
 fn gui_main(
     file_content: String,
     newly_loaded: bool,
-    save_path: OsString,
+    save_path: PathBuf,
     relative_line_numbers: bool,
 ) {
     // make a font
@@ -1972,7 +2059,7 @@ fn gui_main(
 struct Args {
     #[arg()]
     /// file to edit
-    file_path: OsString,
+    file_path: PathBuf,
 
     /// whether to run in gui mode
     #[arg(long, short)]
