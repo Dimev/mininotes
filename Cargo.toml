@@ -11,4 +11,6 @@ crossterm = "0.25.0"
 ropey = "1.5.0"
 unicode-segmentation = "1.10.0"
 unicode-width = "0.1.10"
-arboard = { version = "3.2.0", optional = true }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+arboard = { version = "3.2.0" }
