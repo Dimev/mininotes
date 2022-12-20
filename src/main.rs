@@ -9,7 +9,12 @@ use crossterm::{
     style::Color,
     terminal,
 };
-use swash::FontRef;
+use swash::{
+    scale::{image::Image, Render, ScaleContext, Source, StrikeWith},
+    shape::ShapeContext,
+    text::Script,
+    FontRef,
+};
 
 use std::collections::VecDeque;
 use std::{
@@ -2011,8 +2016,41 @@ fn gui_main(
     let font = FontRef::from_index(font_data, 0).unwrap();
 
     // make the font shaper
+    let mut shape_context = ShapeContext::new();
+    let mut shaper = shape_context
+        .builder(font)
+        .script(Script::Latin)
+        .size(32.0)
+        .build();
 
     // make the font scaler
+    let mut scale_context = ScaleContext::new();
+    let mut scaler = scale_context.builder(font).size(32.0).hint(true).build();
+
+    // draw
+    shaper.add_str("Hello world!");
+    let mut clusters = Vec::new();
+    shaper.shape_with(|cluster| clusters.extend_from_slice(cluster.glyphs));
+
+    // figure out all fonts
+    let images = clusters
+        .into_iter()
+        .filter_map(|glyph| {
+            Render::new(&[
+                // Color outline with the first palette
+                Source::ColorOutline(0),
+                // Color bitmap with best fit selection mode
+                Source::ColorBitmap(StrikeWith::BestFit),
+                // Standard scalable outline
+                Source::Outline,
+            ])
+            .render(&mut scaler, glyph.id)
+            .map(|img| (glyph.advance as u32, glyph.x as u32, glyph.y as u32, img))
+        }).scan(0, |state, (advance, x, y, img)| {
+            *state = *state + advance;
+            Some((*state, y, img))
+        })
+        .collect::<Vec<(u32, u32, Image)>>();
 
     // make the font layout settings
 
@@ -2040,9 +2078,29 @@ fn gui_main(
         // draw all glyphs to the right position
 
         // and update
+        let (width, height) = window.get_size();
+
+        let mut buffer = std::iter::repeat(0)
+            .take(width * height)
+            .collect::<Vec<u32>>();
+
+        // draw
+        for (x, y, image) in images.iter() {
+            for j in 0..image.placement.height {
+                for i in 0..image.placement.width {
+                    let true_x = x + i;
+                    let true_y = 0 + j;
+                    let img_idx = i as usize + j as usize * image.placement.width as usize;
+                    let buf_idx = true_x as usize + width * true_y as usize;
+                    let pixel = image.data[img_idx] as u32;
+                    let pixel_total = pixel | pixel << 8 | pixel << 16 | pixel << 24;
+                    buffer[buf_idx] = pixel_total;
+                }
+            }
+        }
 
         // update!
-        window.update();
+        window.update_with_buffer(&buffer, width, height).unwrap();
     }
 }
 
