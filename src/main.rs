@@ -9,12 +9,6 @@ use crossterm::{
     style::Color,
     terminal,
 };
-use swash::{
-    scale::{image::Image, Render, ScaleContext, Source, StrikeWith},
-    shape::ShapeContext,
-    text::Script,
-    FontRef,
-};
 
 use std::collections::VecDeque;
 use std::{
@@ -24,13 +18,10 @@ use std::{
 
 // editor deps
 use ropey::{Rope, RopeSlice};
-use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 use unicode_width::UnicodeWidthChar;
 
 use std::ops::Range;
-
-// gui deps
-use minifb::{Window, WindowOptions};
 
 // clipboard
 use arboard::Clipboard;
@@ -39,6 +30,8 @@ use arboard::Clipboard;
 use clap::Parser;
 
 // unicode tools =============================================
+
+const TERM_TAB_WIDTH: usize = 0;
 
 // test strings
 // Ｈｅｌｌｏ, ｗｏｒｌｄ!
@@ -109,14 +102,21 @@ pub fn move_grapheme(amount: isize, mut byte_cursor: usize, text: RopeSlice) -> 
 
 /// with of a char iterator in unicode characters
 /// this helps when working with terminal UI layout
-pub fn string_width<I: IntoIterator<Item = char>>(iterator: I) -> usize {
+pub fn string_width<I: IntoIterator<Item = char>>(iterator: I, tab_width: usize) -> usize {
     iterator
         .into_iter()
-        .map(|x| x.width_cjk().unwrap_or(0))
+        .map(|x| {
+            if x == '\t' {
+                tab_width
+            } else {
+                x.width_cjk().unwrap_or(0)
+            }
+        })
         .sum()
 }
 
 /// newline, as recognized by ropey, so either one of line feed, carriage return, vertical tab, form feed, next line, line separator, paragraph separator
+// TODO: char iter?
 pub fn is_newline(c: char) -> bool {
     [
         '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
@@ -149,13 +149,21 @@ pub struct GraphemePosition {
 
 /// Layout settings, which there are none of
 // TODO: bidir?
-pub struct TermLineLayoutSettings {}
+pub struct TermLineLayoutSettings {
+    tab_width: usize,
+}
+
+impl TermLineLayoutSettings {
+    pub fn new(tab_width: usize) -> Self {
+        Self { tab_width }
+    }
+}
 
 impl LineLayout for TermLineLayoutSettings {
     type Iter<'a> = TermLineLayout<'a>;
 
     fn layout_line<'a>(&self, line: RopeSlice<'a>) -> TermLineLayout<'a> {
-        TermLineLayout::new(line)
+        TermLineLayout::new(line, self.tab_width)
     }
 }
 
@@ -169,12 +177,16 @@ pub struct TermLineLayout<'a> {
 
     /// current column
     column: usize,
+
+    /// how wide a tab is
+    tab_width: usize,
 }
 
 impl<'a> TermLineLayout<'a> {
-    pub fn new(line: RopeSlice<'a>) -> Self {
+    pub fn new(line: RopeSlice<'a>, tab_width: usize) -> Self {
         Self {
             line,
+            tab_width,
             cursor: 0,
             column: 0,
         }
@@ -197,7 +209,7 @@ impl<'a> Iterator for TermLineLayout<'a> {
 
             // figure out the width
             // newlines are control characters, so they will have 0 width
-            let grapheme_width = string_width(rope_slice.chars());
+            let grapheme_width = string_width(rope_slice.chars(), self.tab_width);
 
             // make the found grapheme
             let grapheme = GraphemePosition {
@@ -265,12 +277,15 @@ pub struct TextEditor<L: LineLayout> {
 
     /// max undo/redo buffer size
     history_size: usize,
+
+    /// width of a tab
+    tab_width: usize,
 }
 
 impl<L: LineLayout> TextEditor<L> {
     /// create a new editor from the given string and layout settings
     /// newly loaded means it's unsaved
-    pub fn new(content: &str, layout_settings: L, newly_loaded: bool) -> Self {
+    pub fn new(content: &str, layout_settings: L, tab_width: usize, newly_loaded: bool) -> Self {
         Self {
             text: Rope::from_str(content),
             cursor: 0,
@@ -282,7 +297,8 @@ impl<L: LineLayout> TextEditor<L> {
             history: VecDeque::new(),
             save_anchor: if newly_loaded { None } else { Some(0) },
             current_history: 0,
-            history_size: 4096,
+            history_size: 16384,
+            tab_width,
         }
     }
 
@@ -337,17 +353,11 @@ impl<L: LineLayout> TextEditor<L> {
             match change {
                 EditorAction::Delete(cursor, string) => {
                     // insert the string again
-                    self.insert_string(cursor, &string, false);
-
-                    // restore cursor, behind the inserted string
-                    self.cursor = cursor + string.len();
+                    self.insert_string(cursor, &string, false, true, true);
                 }
                 EditorAction::Insert(cursor, string) => {
                     // remove the range
-                    self.remove_range(cursor, cursor + string.len(), false);
-
-                    // restore cursor
-                    self.cursor = cursor;
+                    self.remove_range(cursor, cursor + string.len(), false, true, true);
                 }
             }
         }
@@ -367,17 +377,11 @@ impl<L: LineLayout> TextEditor<L> {
             match change {
                 EditorAction::Insert(cursor, string) => {
                     // insert the text
-                    self.insert_string(cursor, &string, false);
-
-                    // restore cursor, behind the inserted string
-                    self.cursor = cursor + string.len();
+                    self.insert_string(cursor, &string, false, true, true);
                 }
                 EditorAction::Delete(cursor, string) => {
                     // delete the range
-                    self.remove_range(cursor, cursor + string.len(), false);
-
-                    // restore cursor
-                    self.cursor = cursor;
+                    self.remove_range(cursor, cursor + string.len(), false, true, true);
                 }
             }
         }
@@ -434,7 +438,7 @@ impl<L: LineLayout> TextEditor<L> {
             .to_string();
 
         // and remove it
-        self.remove_range(range.start, range.end, true);
+        self.remove_range(range.start, range.end, true, true, true);
 
         // remove the selection
         self.clear_selection();
@@ -484,6 +488,16 @@ impl<L: LineLayout> TextEditor<L> {
         if add_selection {
             self.add_selection();
         } else {
+            // move the cursor to the end with the correct position
+            self.cursor = if amount > 0 {
+                self.cursor
+                    .max(self.selection_anchor.unwrap_or(self.cursor))
+            } else {
+                self.cursor
+                    .min(self.selection_anchor.unwrap_or(self.cursor))
+            };
+
+            // then clear the selection
             self.clear_selection();
         }
 
@@ -547,6 +561,16 @@ impl<L: LineLayout> TextEditor<L> {
         if add_selection {
             self.add_selection();
         } else {
+            // move the cursor to the end with the correct position
+            self.cursor = if amount > 0 {
+                self.cursor
+                    .max(self.selection_anchor.unwrap_or(self.cursor))
+            } else {
+                self.cursor
+                    .min(self.selection_anchor.unwrap_or(self.cursor))
+            };
+
+            // then clear this
             self.clear_selection();
         }
 
@@ -563,7 +587,6 @@ impl<L: LineLayout> TextEditor<L> {
     }
 
     /// insert a character
-    /// start_change indicates if this a singular action (true) or part of a larger action that needs to be undone (false)
     pub fn insert_character_at_cursor(&mut self, character: char) {
         // first, remove selection
         self.cut_selection();
@@ -573,23 +596,22 @@ impl<L: LineLayout> TextEditor<L> {
         let string = character.encode_utf8(&mut buffer);
 
         // insert the string
-        self.insert_string(self.cursor, string, true);
-
-        // move the cursor over
-        self.move_cursor_horizontal(1, false, true);
+        self.insert_string(self.cursor, string, true, true, true);
     }
 
     /// insert a string
-    /// start_change indicates if this is a singular action (true) or part of a larger action that needs to be undone (false)
     pub fn insert_string_at_cursor(&mut self, string: &str) {
         // first, remove selection
         self.cut_selection();
 
         // insert the string
-        self.insert_string(self.cursor, string, true);
+        self.insert_string(self.cursor, string, true, true, true);
+    }
 
-        // move the cursor over
-        self.move_cursor_horizontal(string.graphemes(true).count() as isize, false, true);
+    /// insert a tab
+    pub fn insert_tab_at_cursor(&mut self) {
+        // short for this
+        self.insert_character_at_cursor('\t');
     }
 
     /// insert a newline
@@ -620,10 +642,7 @@ impl<L: LineLayout> TextEditor<L> {
         let string = "\n".chars().chain(pred_whitespace).collect::<String>();
 
         // insert the string, with the added whitespace
-        self.insert_string(self.cursor, &string, true);
-
-        // fix the cursor to go behind the string
-        self.cursor += string.len();
+        self.insert_string(self.cursor, &string, true, true, true);
     }
 
     /// remove a character at the cursor, or the selection, if any
@@ -650,13 +669,23 @@ impl<L: LineLayout> TextEditor<L> {
         };
 
         // remove it
-        self.remove_range(start, end, true);
+        self.remove_range(start, end, true, true, true);
     }
 
     /// insert a string of characters, at the start byte indicated
     /// assumes that start points at a correct grapheme boundary
     /// record indicates whether or not to record this action in the history
-    pub fn insert_string(&mut self, start: usize, string: &str, record: bool) {
+    pub fn insert_string(
+        &mut self,
+        start: usize,
+        string: &str,
+        record: bool,
+        store_cursor: bool,
+        move_cursor_after: bool,
+    ) {
+        // clear this
+        self.clear_selection();
+
         // get the start position in chars
         let start_char = self.text.byte_to_char(start);
 
@@ -673,12 +702,33 @@ impl<L: LineLayout> TextEditor<L> {
             // after the range, so move it over the right amount of bytes to compensate for the added range
             self.cursor += string.len();
         }
+
+        // move the cursor to after the inserted text
+        if move_cursor_after {
+            // move it after the inserted item
+            self.cursor = start + string.len();
+        }
+
+        // and recalculate the target column
+        if store_cursor {
+            self.target_column = self.get_cursor_column();
+        }
     }
 
     /// remove a range of characters, in bytes, start..end
     /// assumes that the range is in correct graphemes
     /// record indicates whether or not to record this action in the history
-    pub fn remove_range(&mut self, start: usize, end: usize, record: bool) {
+    pub fn remove_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        record: bool,
+        store_cursor: bool,
+        move_cursor_after: bool,
+    ) {
+        // clear this
+        self.clear_selection();
+
         // find the start and end range in chars
         let start_char = self.text.byte_to_char(start);
         let end_char = self.text.byte_to_char(end);
@@ -702,6 +752,16 @@ impl<L: LineLayout> TextEditor<L> {
             // after the end, so move it over the right amount of bytes to compensate the removed range
             self.cursor -= end - start;
         }
+
+        // move cursor to the deleted text
+        if move_cursor_after {
+            self.cursor = start;
+        }
+
+        // and recalculate the target column
+        if store_cursor {
+            self.target_column = self.get_cursor_column();
+        }
     }
 
     /// move the cursor to a specific column, assuming a terminal program
@@ -723,7 +783,8 @@ impl<L: LineLayout> TextEditor<L> {
         let cursor_pos = self
             .layout_settings
             .layout_line(line)
-            .find(|x| (x.start_column..x.end_column).contains(&column))
+            .take_while(|x| x.start_column <= column)
+            .last()
             .map(|x| self.cursor + x.cursor);
 
         // need to do this here, otherwise the borrowchecker can't see we don't need to borrow self in line when doing move_cursor
@@ -1291,7 +1352,7 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'
             right_chars.next()
         } {
             // add to the column
-            column += string_width(std::iter::once(character.c));
+            column += string_width(std::iter::once(character.c), TERM_TAB_WIDTH);
 
             // wrap if it's on the next line
             if column >= width {
@@ -1343,7 +1404,7 @@ impl<'a> TerminalBuffer for TextLine<'a> {
             .chars()
             .chain(std::iter::repeat(' '))
             .scan(0, |acc, x| {
-                *acc += string_width(std::iter::once(x));
+                *acc += string_width(std::iter::once(x), TERM_TAB_WIDTH);
                 if *acc <= width * height {
                     Some(x)
                 } else {
@@ -1356,7 +1417,7 @@ impl<'a> TerminalBuffer for TextLine<'a> {
 
     fn preferred_width(&self, _: usize) -> Option<usize> {
         // prefer to fit enough on here
-        Some(string_width(self.string.chars()))
+        Some(string_width(self.string.chars(), TERM_TAB_WIDTH))
     }
 
     fn preferred_height(&self, _: usize) -> Option<usize> {
@@ -1512,7 +1573,7 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
                     }
 
                     // get the grapheme width
-                    let grapheme_width = string_width(grapheme.chars());
+                    let grapheme_width = string_width(grapheme.chars(), self.tab_width);
 
                     // if it doesn't fit in the buffer, pad spaces
                     if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
@@ -1529,7 +1590,16 @@ impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
                                 .take(self.scroll_columns + width - column),
                         );
 
-                    // otherwise, add our characters
+                    // otherwise, add spaces if it's a tab
+                    } else if column >= self.scroll_columns
+                        && column + grapheme_width <= self.scroll_columns + width
+                        && grapheme.chars().eq(std::iter::once('\t'))
+                    {
+                        buffer.extend(std::iter::repeat(' ').take(self.tab_width).map(|x| {
+                            Char::new_text(x, selection_range.contains(&(cursor + line_start)))
+                        }));
+
+                    // otherwise, add characters
                     } else if column >= self.scroll_columns
                         && column + grapheme_width <= self.scroll_columns + width
                     {
@@ -1731,7 +1801,7 @@ pub fn render(
         }
 
         // calculate the new cursor position
-        x += string_width(std::iter::once(c.c));
+        x += string_width(std::iter::once(c.c), TERM_TAB_WIDTH);
 
         // if it's off to the side, reset
         if x >= width {
@@ -1746,7 +1816,7 @@ pub fn render(
         while prev_x < x || prev_y < y {
             if let Some(c) = prev_chars.next() {
                 // update the position
-                prev_x += string_width(std::iter::once(c.c));
+                prev_x += string_width(std::iter::once(c.c), TERM_TAB_WIDTH);
 
                 // and wrap
                 if prev_x >= width {
@@ -1784,7 +1854,12 @@ fn terminal_main(
     let (mut width, mut height) = terminal::size().unwrap();
 
     // editor
-    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {}, newly_loaded);
+    let mut editor = TextEditor::new(
+        &file_content,
+        TermLineLayoutSettings::new(4),
+        4,
+        newly_loaded,
+    );
 
     // clipboard
     let mut clip = String::new();
@@ -1939,6 +2014,8 @@ fn terminal_main(
                         editor.insert_character_at_cursor(c);
                     } else if code == KeyCode::Enter {
                         editor.insert_newline_at_cursor();
+                    } else if code == KeyCode::Tab {
+                        editor.insert_tab_at_cursor();
                     }
                     // remove text
                     else if code == KeyCode::Backspace {
@@ -2004,106 +2081,6 @@ fn terminal_main(
     cleanup_terminal("Done");
 }
 
-// gui ===============================================================
-fn gui_main(
-    file_content: String,
-    newly_loaded: bool,
-    save_path: PathBuf,
-    relative_line_numbers: bool,
-) {
-    // make a font
-    let font_data = include_bytes!("fira-code.ttf");
-    let font = FontRef::from_index(font_data, 0).unwrap();
-
-    // make the font shaper
-    let mut shape_context = ShapeContext::new();
-    let mut shaper = shape_context
-        .builder(font)
-        .script(Script::Latin)
-        .size(32.0)
-        .build();
-
-    // make the font scaler
-    let mut scale_context = ScaleContext::new();
-    let mut scaler = scale_context.builder(font).size(32.0).hint(true).build();
-
-    // draw
-    shaper.add_str("Hello world!");
-    let mut clusters = Vec::new();
-    shaper.shape_with(|cluster| clusters.extend_from_slice(cluster.glyphs));
-
-    // figure out all fonts
-    let images = clusters
-        .into_iter()
-        .filter_map(|glyph| {
-            Render::new(&[
-                // Color outline with the first palette
-                Source::ColorOutline(0),
-                // Color bitmap with best fit selection mode
-                Source::ColorBitmap(StrikeWith::BestFit),
-                // Standard scalable outline
-                Source::Outline,
-            ])
-            .render(&mut scaler, glyph.id)
-            .map(|img| (glyph.advance as u32, glyph.x as u32, glyph.y as u32, img))
-        }).scan(0, |state, (advance, x, y, img)| {
-            *state = *state + advance;
-            Some((*state, y, img))
-        })
-        .collect::<Vec<(u32, u32, Image)>>();
-
-    // make the font layout settings
-
-    // make the editor
-    let mut editor = TextEditor::new(&file_content, TermLineLayoutSettings {}, newly_loaded);
-
-    // start the  window
-    let mut window = Window::new(
-        "mininotes",
-        800,
-        450,
-        WindowOptions {
-            borderless: false,
-            resize: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    while window.is_open() {
-        // update editor
-
-        // get all glyphs that need to be laid out
-
-        // draw all glyphs to the right position
-
-        // and update
-        let (width, height) = window.get_size();
-
-        let mut buffer = std::iter::repeat(0)
-            .take(width * height)
-            .collect::<Vec<u32>>();
-
-        // draw
-        for (x, y, image) in images.iter() {
-            for j in 0..image.placement.height {
-                for i in 0..image.placement.width {
-                    let true_x = x + i;
-                    let true_y = 0 + j;
-                    let img_idx = i as usize + j as usize * image.placement.width as usize;
-                    let buf_idx = true_x as usize + width * true_y as usize;
-                    let pixel = image.data[img_idx] as u32;
-                    let pixel_total = pixel | pixel << 8 | pixel << 16 | pixel << 24;
-                    buffer[buf_idx] = pixel_total;
-                }
-            }
-        }
-
-        // update!
-        window.update_with_buffer(&buffer, width, height).unwrap();
-    }
-}
-
 // arg parsing ======================================================
 
 #[derive(Parser)]
@@ -2111,10 +2088,6 @@ struct Args {
     #[arg()]
     /// file to edit
     file_path: PathBuf,
-
-    /// whether to run in gui mode
-    #[arg(long, short)]
-    gui: bool,
 
     /// whether to use relative line numbers
     #[arg(long, short)]
@@ -2137,19 +2110,10 @@ fn main() {
         }
     };
 
-    if args.gui {
-        gui_main(
-            file_content,
-            newly_loaded,
-            args.file_path,
-            args.relative_line_numbers,
-        );
-    } else {
-        terminal_main(
-            file_content,
-            newly_loaded,
-            args.file_path,
-            args.relative_line_numbers,
-        );
-    }
+    terminal_main(
+        file_content,
+        newly_loaded,
+        args.file_path,
+        args.relative_line_numbers,
+    );
 }

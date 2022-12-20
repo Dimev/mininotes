@@ -18,10 +18,5 @@ Current goals:
  - skip words navigation - V
  - clean up code
  
-Maybe goals:
- - gui renderer (first steps are there, but font rendering is pain)
- 
 # Licence
 WTFPL
-
-Does not apply on fira-code.ttf, which is instead under the open font licence 
