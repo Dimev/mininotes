@@ -23,8 +23,45 @@ use unicode_width::UnicodeWidthChar;
 
 use std::ops::Range;
 
-// clipboard
+// clipboard, only include on desktop platforms so it can compile on termux
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 use arboard::Clipboard;
+
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "openbsd",
+    target_os = "netbsd"
+)))] 
+#[allow(non_snake_case)]
+mod Clipboard {
+    pub fn new() -> Result<DummyClip, ()> {
+        Err(())
+    }
+    
+    pub struct DummyClip(String);
+    
+    impl DummyClip {
+        pub fn get_text(&mut self) -> Result<String, ()> {
+            Ok(self.0.clone())
+        }
+
+        pub fn set_text(&mut self, string: String) {
+            self.0 = string;
+        }
+    }
+}
 
 // arg parsing
 use clap::Parser;
@@ -1846,6 +1883,7 @@ fn terminal_main(
     newly_loaded: bool,
     save_path: PathBuf,
     relative_line_numbers: bool,
+    tab_width: usize,
 ) {
     // set up the terminal
     setup_terminal();
@@ -1856,8 +1894,8 @@ fn terminal_main(
     // editor
     let mut editor = TextEditor::new(
         &file_content,
-        TermLineLayoutSettings::new(4),
-        4,
+        TermLineLayoutSettings::new(tab_width),
+        tab_width,
         newly_loaded,
     );
 
@@ -2089,6 +2127,10 @@ struct Args {
     /// file to edit
     file_path: PathBuf,
 
+    /// tab width
+    #[arg(long, short, default_value_t = 4)]
+    tab_width: usize,
+
     /// whether to use relative line numbers
     #[arg(long, short)]
     relative_line_numbers: bool,
@@ -2115,5 +2157,6 @@ fn main() {
         newly_loaded,
         args.file_path,
         args.relative_line_numbers,
+        args.tab_width,
     );
 }
