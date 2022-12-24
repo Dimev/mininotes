@@ -1132,6 +1132,9 @@ impl Highlight {
 }
 
 // ui actions ===========================================
+
+/// Enum representing an action in the UI
+/// This can be used for both in and out, as they are similar enough
 #[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub enum UiEvent {
     /// clicked a position
@@ -1187,6 +1190,112 @@ pub enum UiEvent {
 }
 
 // ui layout/terminal drawing ===========================
+
+// TODO: figure out a better way to do this
+// probably a good way of doing it:
+// struct LaidOutWidget { widget, width, height }
+//
+// trait to represent a widget:
+//  - preferred sizes
+//  - layout -> provided, returns it wrapped in a struct to indicate sizes
+//
+// then also provide a few other traits
+// - draw: tells how to draw each widget (once laid out inside the LaidOutWidget) + maybe combine multiple?
+// - handle IO: tells how to handle IO for each widget, once laid out
+// 
+// TODO: figure out a good way to manage multiple widgets
+// maybe use dyn + a vec of widgets here?
+// or a widget with a left and right, and a split? -> binary tree?
+// dyn is probably better here tho
+
+/// UI widget after layout, representing it already being sized
+pub struct SizedWidget<'a, W: Widget> {
+    
+    /// inner widget
+    widget: &'a W,
+
+    /// width of the widget
+    width: u32,
+
+    /// height of the widget
+    height: u32,
+}
+
+/// UI widget
+pub trait Widget: Sized {
+    /// preferred width
+    fn preferred_width(&self) -> usize;
+
+    /// preferred height
+    fn preferred_height(&self) -> usize;
+
+    /// layout the widget according to the right size
+    fn layout<'a>(&'a self) -> SizedWidget<'a, Self>;
+}
+
+/// draw a widget
+pub trait Drawable {
+    /// the type to draw to
+    type DrawResult;
+
+    /// draw
+    fn draw(&self, width: u32, height: u32) -> Self::DrawResult;
+}
+
+/// handle input for a widget
+pub trait Interactive {
+    /// input type
+    type Input;
+
+    /// output type
+    type Output;
+
+    /// react to events
+    fn interact(&self, input: Self::Input, width: u32, height: u32) -> Self::Output;
+}
+
+// TODO: trait to convert element into a widget
+
+/// pane split left and right
+#[derive(Copy, Clone)]
+pub struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
+    left: &'a L,
+    right: &'a R,
+    mode: SplitMode,
+}
+
+
+/// pane split top and bottom
+#[derive(Copy, Clone)]
+pub struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
+    pub top: &'a L,
+    pub bottom: &'a R,
+    pub mode: SplitMode,
+}
+
+/// trait representing a UI element, for a specific type of UI layout
+pub trait Element {
+    /// type to do drawing for
+    type DrawResult;
+
+    /// type to do processing for
+    type InputEvent;
+
+    /// type to return as result of processing
+    type OutputEvent;
+
+    /// draw the element
+    fn draw(&self) -> Self::DrawResult;
+
+    /// handle input
+    fn process(&self, input: Self::InputEvent) -> Self::OutputEvent;
+    
+    /// get the preferred width
+    fn preferred_width(&self, height: usize) -> Option<usize>;
+
+    /// get the preferred height
+    fn preferred_height(&self, width: usize) -> Option<usize>;
+}
 
 /// terminal rendering trait
 pub trait TerminalBuffer: Sized {
@@ -1306,14 +1415,6 @@ impl SplitMode {
 
 // TODO: mutable splits, as well as the ability to get the cursor position, run functions etc
 
-/// pane split top and bottom
-#[derive(Copy, Clone)]
-pub struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
-    pub top: &'a L,
-    pub bottom: &'a R,
-    pub mode: SplitMode,
-}
-
 impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane<'a, L, R> {
     fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
         // figure out the correct split
@@ -1350,14 +1451,6 @@ impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane
             _ => None,
         }
     }
-}
-
-/// pane split left and right
-#[derive(Copy, Clone)]
-pub struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
-    left: &'a L,
-    right: &'a R,
-    mode: SplitMode,
 }
 
 impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'a, L, R> {
