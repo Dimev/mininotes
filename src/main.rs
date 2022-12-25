@@ -1296,7 +1296,6 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
                 // the lowest position is the new origin
                 x.min(item.x),
                 y.min(item.x),
-
                 // if one of these changed, the width/height for that axis also changed
                 if item.x != x {
                     item.width + width
@@ -1317,6 +1316,7 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
                 result = result.combine_horizontal(
                     item.widget.draw(item.width, item.height),
                     new_width,
+                    width,
                     new_height,
                 );
             } else if item.x < x {
@@ -1324,20 +1324,23 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
                 result = item
                     .widget
                     .draw(item.width, item.height)
-                    .combine_horizontal(result, new_width, new_height);
+                    .combine_horizontal(result, new_width, item.width, new_height);
             } else if item.y > y {
                 // expand to the bottom
                 result = result.combine_vertical(
                     item.widget.draw(item.width, item.height),
                     new_width,
+                    height,
                     new_height,
                 );
             } else if item.y < y {
                 // expand to the top
-                result = item
-                    .widget
-                    .draw(item.width, item.height)
-                    .combine_vertical(result, new_width, new_height);
+                result = item.widget.draw(item.width, item.height).combine_vertical(
+                    result,
+                    new_width,
+                    item.height,
+                    new_height,
+                );
             }
 
             // set the new sizes
@@ -1457,10 +1460,10 @@ pub trait DrawResult {
     fn empty(width: u32, height: u32) -> Self;
 
     /// combine horizontally, self is left, other is right
-    fn combine_horizontal(self, other: Self, width: u32, height: u32) -> Self;
+    fn combine_horizontal(self, other: Self, width: u32, split: u32, height: u32) -> Self;
 
     /// combine vertically, self is top, other is bottom
-    fn combine_vertical(self, other: Self, width: u32, height: u32) -> Self;
+    fn combine_vertical(self, other: Self, width: u32, split: u32, height: u32) -> Self;
 }
 
 /// Trait representing a result of an interaction
@@ -1471,6 +1474,299 @@ pub trait OutputResult {
 
     /// combine the results
     fn combine(self, other: Self) -> Self;
+}
+
+/// implement the traits for the widgets of mininotes ====================
+
+impl<'a> Drawable<ColoredString> for TextLine<'a> {
+    fn draw(&self, width: u32, height: u32) -> ColoredString {
+        // simply add extra padding
+        self.string
+            .chars()
+            .chain(std::iter::repeat(' '))
+            .scan(0, |acc, x| {
+                *acc += string_width(std::iter::once(x), TERM_TAB_WIDTH);
+                if *acc <= width as usize * height as usize {
+                    Some(x)
+                } else {
+                    None
+                }
+            })
+            .map(|c| Char::new(c, Highlight::Status))
+            .collect()
+    }
+}
+
+impl<'a> Interactive<UiEvent, Vec<UiEvent>> for TextLine<'a> {
+    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiEvent> {
+        Vec::new()
+    }
+}
+
+impl<'a> Widget<ColoredString, UiEvent, Vec<UiEvent>> for TextLine<'a> {
+    fn minimum_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (1, 1)
+    }
+
+    fn maximum_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (width, height)
+    }
+}
+
+impl Drawable<ColoredString> for LineNumbers {
+    fn draw(&self, width: u32, height: u32) -> ColoredString {
+        // buffer to add to
+        let mut buffer = ColoredString::with_capacity(width as usize * height as usize);
+
+        // figure out the max number padding
+        let padding = self.width_number(height as usize);
+
+        // figure out the number of spaces to pad at the front
+        let space_padding = (width as usize).saturating_sub(padding + 1).max(1);
+
+        // lines to show, start and end
+        let start = self.start + 1;
+        let end = (self.start + 1 + height as usize).min(self.total + 1);
+
+        // add the line numbers
+        for line in start..end {
+            // current column
+            let mut column = 0;
+
+            // push starting space
+            while column < (width as usize).min(space_padding) {
+                buffer.push(Char::new(' ', Highlight::Gutter));
+                column += 1;
+            }
+
+            // get the start number
+            let mut base = (10 as usize).pow(padding.saturating_sub(1) as u32);
+
+            // get the line number
+            let line_number = if self.relative && line != self.current {
+                // difference if we are not on the same line
+                line.abs_diff(self.current)
+            } else {
+                line
+            };
+
+            // go as long as it's > 0, calculate the number to show
+            while base > 0 && column < width as usize {
+                // see if we need to show a number
+                if line_number / base > 0 {
+                    // something, get the digit
+                    let digit = (line_number / base) % 10;
+
+                    // get it as char
+                    let character = char::from_digit(digit as u32, 10).unwrap();
+
+                    // push it
+                    buffer.push(Char::new(character, Highlight::Gutter));
+                } else {
+                    // nothing, show a space
+                    buffer.push(Char::new(' ', Highlight::Gutter));
+                }
+
+                // next base
+                base /= 10;
+
+                // next column
+                column += 1;
+            }
+
+            // push remaining space, if any can fit
+            if column < width as usize {
+                buffer.push(Char::new(' ', Highlight::Gutter));
+            }
+        }
+
+        // and the rest
+        buffer.extend(
+            // generate the ~, over and over
+            std::iter::repeat((0..width as usize).map(|x| {
+                if x == padding {
+                    Char::new('~', Highlight::Gutter)
+                } else {
+                    Char::new(' ', Highlight::Gutter)
+                }
+            }))
+            // for the remaining lines
+            .take((height as usize).saturating_sub(end - start))
+            .flatten(),
+        );
+
+        // return
+        buffer
+    }
+}
+
+impl Interactive<UiEvent, Vec<UiEvent>> for LineNumbers {
+    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiEvent> {
+        Vec::new()
+    }
+}
+
+impl Drawable<ColoredString> for TextEditor<TermLineLayoutSettings> {
+    fn draw(&self, width: u32, height: u32) -> ColoredString {
+        // all found text lines
+        let mut buffer = ColoredString::with_capacity(width as usize * height as usize);
+
+        // selection range, empty if none exists
+        let selection_range = self.get_selection_range().unwrap_or(0..0);
+
+        // go over all lines in the buffer
+        for line_num in self.scroll_lines..self.scroll_lines + height as usize {
+            // current column
+            let mut column = 0;
+
+            // current cursor in the column
+            let mut cursor = 0;
+
+            // get the line
+            if let Some(line) = self.text.get_line(line_num) {
+                // where in the buffer the line is
+                let line_start = self.text.line_to_byte(line_num);
+
+                // go over all columns until we are either out of bounds or end of the line
+                while cursor < line.len_bytes() && column < self.scroll_columns + width as usize {
+                    // get the next cursor pos
+                    let next_cursor = move_grapheme(1, cursor, line);
+
+                    // get the grapheme
+                    let grapheme = line.byte_slice(cursor..next_cursor);
+
+                    // stop if it's a newline
+                    if grapheme.chars().any(|x| is_newline(x)) {
+                        // if there's still room on the line, mark this as selected, if that's the case
+                        if column >= self.scroll_columns
+                            && column + 1 <= self.scroll_columns + width as usize
+                            && selection_range.contains(&(cursor + line_start))
+                        {
+                            // add to the buffer
+                            buffer.push(Char::new(' ', Highlight::Selection));
+
+                            // move over a column
+                            column += 1;
+                        }
+
+                        // and stop, so the rest of the line is empty
+                        break;
+                    }
+
+                    // get the grapheme width
+                    let grapheme_width = string_width(grapheme.chars(), self.tab_width);
+
+                    // if it doesn't fit in the buffer, pad spaces
+                    if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
+                    {
+                        buffer.extend(
+                            std::iter::repeat(Char::new_text(' ', false))
+                                .take(column + grapheme_width - self.scroll_columns),
+                        );
+
+                    // if we exceed the line, pad spaces instead
+                    } else if column + grapheme_width > self.scroll_columns + width as usize {
+                        buffer.extend(
+                            std::iter::repeat(Char::new_text(' ', false))
+                                .take(self.scroll_columns + width as usize - column),
+                        );
+
+                    // otherwise, add spaces if it's a tab
+                    } else if column >= self.scroll_columns
+                        && column + grapheme_width <= self.scroll_columns + width as usize
+                        && grapheme.chars().eq(std::iter::once('\t'))
+                    {
+                        buffer.extend(std::iter::repeat(' ').take(self.tab_width).map(|x| {
+                            Char::new_text(x, selection_range.contains(&(cursor + line_start)))
+                        }));
+
+                    // otherwise, add characters
+                    } else if column >= self.scroll_columns
+                        && column + grapheme_width <= self.scroll_columns + width as usize
+                    {
+                        buffer.extend(grapheme.chars().map(|x| {
+                            Char::new_text(x, selection_range.contains(&(cursor + line_start)))
+                        }));
+                    }
+
+                    // update
+                    cursor = next_cursor;
+                    column += grapheme_width;
+                }
+            }
+
+            // final padding
+            buffer.extend(
+                std::iter::repeat(Char::new_text(' ', false)).take(
+                    (width as usize + self.scroll_columns)
+                        .saturating_sub(column.max(self.scroll_columns)),
+                ),
+            );
+        }
+
+        buffer
+    }
+}
+
+impl Interactive<UiEvent, Vec<UiEvent>> for TextEditor<TermLineLayoutSettings> {
+    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiEvent> {
+        Vec::new()
+    }
+}
+
+impl OutputResult for Vec<UiEvent> {
+    fn empty() -> Self {
+        Vec::new()
+    }
+
+    fn combine(self, other: Self) -> Self {
+        self.into_iter().chain(other.into_iter()).collect()
+    }
+}
+
+impl DrawResult for ColoredString {
+    fn empty(width: u32, height: u32) -> Self {
+        std::iter::repeat(Char::new_text(' ', false))
+            .take(width as usize * height as usize)
+            .collect()
+    }
+
+    fn combine_vertical(self, other: Self, _: u32, _: u32, _: u32) -> Self {
+        // and just stitch them together
+        self.iter().chain(other.iter()).copied().collect()
+    }
+
+    fn combine_horizontal(self, other: Self, width: u32, split: u32, _: u32) -> Self {
+        // iterator over the buffers
+        let mut left_chars = self.iter();
+        let mut right_chars = other.iter();
+
+        // current column
+        let mut column = 0;
+
+        // string to generate
+        let mut buffer = ColoredString::with_capacity(self.len() + other.len());
+
+        // and add the lines together
+        while let Some(character) = if column < split as usize {
+            left_chars.next()
+        } else {
+            right_chars.next()
+        } {
+            // add to the column
+            column += string_width(std::iter::once(character.c), TERM_TAB_WIDTH);
+
+            // wrap if it's on the next line
+            if column >= width as usize {
+                column -= width as usize;
+            }
+
+            // push it
+            buffer.push(*character);
+        }
+
+        buffer
+    }
 }
 
 // TODO: trait to convert element into a widget
@@ -2047,6 +2343,16 @@ pub fn render_editor_to_buffer(
         .map(|(x, y)| (x + lines.width(height), y));
 
     // and simply perform layout
+    /*let x = Layout::new(width as u32, height as u32)
+        .add_item(
+            &TextLine::new(&status_line),
+            Align::Bottom,
+            Restriction::Shrink,
+        )
+        .add_item(&lines, Align::Left, Restriction::Shrink)
+        .add_item(editor, Align::Left, Restriction::Grow)
+        .draw();*/
+
     (
         lines
             .left_of(&editor, SplitMode::PreferLeft)
