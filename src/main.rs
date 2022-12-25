@@ -43,15 +43,15 @@ use arboard::Clipboard;
     target_os = "dragonfly",
     target_os = "openbsd",
     target_os = "netbsd"
-)))] 
+)))]
 #[allow(non_snake_case)]
 mod Clipboard {
     pub fn new() -> Result<DummyClip, ()> {
         Err(())
     }
-    
+
     pub struct DummyClip(String);
-    
+
     impl DummyClip {
         pub fn get_text(&mut self) -> Result<String, ()> {
             Ok(self.0.clone())
@@ -1192,66 +1192,285 @@ pub enum UiEvent {
 // ui layout/terminal drawing ===========================
 
 // TODO: figure out a better way to do this
-// probably a good way of doing it:
-// struct LaidOutWidget { widget, width, height }
-//
-// trait to represent a widget:
-//  - preferred sizes
-//  - layout -> provided, returns it wrapped in a struct to indicate sizes
-//
-// then also provide a few other traits
-// - draw: tells how to draw each widget (once laid out inside the LaidOutWidget) + maybe combine multiple?
-// - handle IO: tells how to handle IO for each widget, once laid out
-// 
-// TODO: figure out a good way to manage multiple widgets
-// maybe use dyn + a vec of widgets here?
-// or a widget with a left and right, and a split? -> binary tree?
-// dyn is probably better here tho
+// a good way of doing it:
+// provide a layout struct
+// this struct keeps track of remaining area
+// it also manages all rendering/interaction
+// similar to tui, and handles some things better hopefully
 
-/// UI widget after layout, representing it already being sized
-pub struct SizedWidget<'a, W: Widget> {
-    
-    /// inner widget
-    widget: &'a W,
+/// Layout align
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Align {
+    /// Stick to the bottom.
+    /// Takes maximum size left and right
+    Bottom,
 
-    /// width of the widget
+    /// Stick to the top.
+    /// Takes maximum size left and right
+    Top,
+
+    /// Stick to the left.
+    /// Takes maximum size top and bottom
+    Left,
+
+    /// Stick to the right.
+    /// Takes maximum size top and bottom
+    Right,
+}
+
+/// Layout restrictions
+pub enum Restriction {
+    /// grow as far out as possible
+    Grow,
+
+    /// become as small as possible
+    Shrink,
+}
+
+/// layout item
+pub struct LayoutItem<'a, R: DrawResult, I, O: OutputResult> {
+    /// x position, left to right
+    x: u32,
+
+    /// y position, top to bottom
+    y: u32,
+
+    /// width of the element
     width: u32,
 
-    /// height of the widget
+    /// height of the element
     height: u32,
+
+    /// widget
+    widget: &'a dyn Widget<R, I, O>,
+}
+
+/// UI layout widget
+/// if this needs to be expanded more, layers of UI layout can be added, where each layer is stacked on top of eachother
+/// if UI layout is then done in stages (once for interaction, once for visuals) it would be possible to add those hovering panels with ease (assuming no interaction needed)
+pub struct Layout<'a, R: DrawResult, I, O: OutputResult> {
+    /// all items
+    items: Vec<LayoutItem<'a, R, I, O>>,
+
+    /// currently leftover space
+    /// as a rectangle
+    space: (u32, u32, u32, u32),
+}
+
+impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
+    /// create a new layout
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            space: (0, 0, width, height),
+            items: Vec::new(),
+        }
+    }
+
+    /// handle interactions
+    pub fn interact(self, interactions: &I) -> O {
+        // simply pass the interaction over all widgets, and combine their result
+        // because `O` is a monoid, folds are trivial
+        self.items
+            .iter()
+            .map(|x| x.widget.interact(interactions, x.x, x.y, x.width, x.height))
+            .fold(O::empty(), O::combine)
+    }
+
+    /// draw the UI
+    pub fn draw(self) -> R {
+        // start with any empty area that is left over
+        let mut result = R::empty(self.space.2 - self.space.0, self.space.3 - self.space.1);
+
+        // figure out the current start positions
+        let (mut x, mut y, mut width, mut height) = (
+            self.space.0,
+            self.space.1,
+            self.space.2 - self.space.0,
+            self.space.3 - self.space.1,
+        );
+
+        // next, go over all widgets backwards
+        for item in self.items.iter().rev() {
+            // calculate the new sizes
+            let (new_x, new_y, new_width, new_height) = (
+                // the lowest position is the new origin
+                x.min(item.x),
+                y.min(item.x),
+
+                // if one of these changed, the width/height for that axis also changed
+                if item.x != x {
+                    item.width + width
+                } else {
+                    width
+                },
+                if item.y != y {
+                    item.height + height
+                } else {
+                    height
+                },
+            );
+
+            // figure out how to combine it with the current state
+            // because we can guarantee we only expand to either one of the sides, this can be done somewhat easily
+            if item.x > x {
+                // expand to the right
+                result = result.combine_horizontal(
+                    item.widget.draw(item.width, item.height),
+                    new_width,
+                    new_height,
+                );
+            } else if item.x < x {
+                // expand to the left
+                result = item
+                    .widget
+                    .draw(item.width, item.height)
+                    .combine_horizontal(result, new_width, new_height);
+            } else if item.y > y {
+                // expand to the bottom
+                result = result.combine_vertical(
+                    item.widget.draw(item.width, item.height),
+                    new_width,
+                    new_height,
+                );
+            } else if item.y < y {
+                // expand to the top
+                result = item
+                    .widget
+                    .draw(item.width, item.height)
+                    .combine_vertical(result, new_width, new_height);
+            }
+
+            // set the new sizes
+            x = new_x;
+            y = new_y;
+            width = new_width;
+            height = new_height;
+        }
+
+        // return the result
+        result
+    }
+
+    /// add an item to the UI layout
+    /// This is intended to work via the builder pattern, so it consumes self, and returns a modified version
+    pub fn add_item(
+        mut self,
+        item: &'a dyn Widget<R, I, O>,
+        align: Align,
+        restriction: Restriction,
+    ) -> Self {
+        // figure out the orientation and in what direction to certainly expand
+        let expand_horizontal = match align {
+            Align::Top | Align::Bottom => true,
+            Align::Left | Align::Right => false,
+        };
+
+        // current width and height
+        let width = self.space.2 - self.space.0;
+        let height = self.space.3 - self.space.1;
+
+        // figure out the size this will take up
+        let (min_width, min_height) = item.minimum_size(width, height);
+        let (max_width, max_height) = item.maximum_size(width, height);
+
+        // actually scale the widget
+        let (widget_width, widget_height) = if expand_horizontal {
+            (
+                width,
+                match restriction {
+                    Restriction::Grow => max_height.min(height),
+                    Restriction::Shrink => min_height.min(height),
+                },
+            )
+        } else {
+            (
+                match restriction {
+                    Restriction::Grow => max_width.min(width),
+                    Restriction::Shrink => min_width.min(width),
+                },
+                height,
+            )
+        };
+
+        // figure out the top left corner
+        let (widget_x, widget_y) = match align {
+            Align::Top | Align::Left => (self.space.0, self.space.1),
+            Align::Bottom => (self.space.0, self.space.3 - widget_height),
+            Align::Right => (self.space.2 - widget_width, self.space.1),
+        };
+
+        // resize the available space
+        // if the widget is positioned at the available space corner, it needs to move over by the widget size
+        // otherwise, the other end of the corner needs to move to the widget corner, as it is now filled
+        if widget_x == self.space.0 {
+            self.space.0 = widget_x + widget_width
+        } else {
+            self.space.2 = widget_x
+        }
+        if widget_y == self.space.1 {
+            self.space.1 = widget_y + widget_height
+        } else {
+            self.space.3 = widget_y
+        }
+
+        // add the widget
+        self.items.push(LayoutItem {
+            x: widget_x,
+            y: widget_y,
+            width: widget_width,
+            height: widget_height,
+            widget: item,
+        });
+
+        // return
+        self
+    }
 }
 
 /// UI widget
-pub trait Widget: Sized {
-    /// preferred width
-    fn preferred_width(&self) -> usize;
+pub trait Widget<R: DrawResult, I, O: OutputResult>: Drawable<R> + Interactive<I, O> {
+    /// Returns the preferred minimum width and height, frrom the available width and height
+    fn minimum_size(&self, width: u32, height: u32) -> (u32, u32);
 
-    /// preferred height
-    fn preferred_height(&self) -> usize;
-
-    /// layout the widget according to the right size
-    fn layout<'a>(&'a self) -> SizedWidget<'a, Self>;
+    /// returns the preferred maximum width and height, from the available width and height
+    fn maximum_size(&self, width: u32, height: u32) -> (u32, u32);
 }
 
 /// draw a widget
-pub trait Drawable {
-    /// the type to draw to
-    type DrawResult;
-
+/// `R` is the result a draw produces
+pub trait Drawable<R: DrawResult> {
     /// draw
-    fn draw(&self, width: u32, height: u32) -> Self::DrawResult;
+    fn draw(&self, width: u32, height: u32) -> R;
 }
 
 /// handle input for a widget
-pub trait Interactive {
-    /// input type
-    type Input;
-
-    /// output type
-    type Output;
-
+/// `I` is the input type, `O` is the result of an interaction
+pub trait Interactive<I, O: OutputResult> {
     /// react to events
-    fn interact(&self, input: Self::Input, width: u32, height: u32) -> Self::Output;
+    fn interact(&self, input: &I, x: u32, y: u32, width: u32, height: u32) -> O;
+}
+
+/// Trait representing a result of a draw
+/// These need to be combined after layout to produce a full draw result, so it needs to implement those functions
+pub trait DrawResult {
+    /// Produce a result for an empty area
+    fn empty(width: u32, height: u32) -> Self;
+
+    /// combine horizontally, self is left, other is right
+    fn combine_horizontal(self, other: Self, width: u32, height: u32) -> Self;
+
+    /// combine vertically, self is top, other is bottom
+    fn combine_vertical(self, other: Self, width: u32, height: u32) -> Self;
+}
+
+/// Trait representing a result of an interaction
+/// Multiple interactions may happen for a widget, so they need to be combined
+pub trait OutputResult {
+    /// Produce a result for an empty interaction
+    fn empty() -> Self;
+
+    /// combine the results
+    fn combine(self, other: Self) -> Self;
 }
 
 // TODO: trait to convert element into a widget
@@ -1264,37 +1483,12 @@ pub struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
     mode: SplitMode,
 }
 
-
 /// pane split top and bottom
 #[derive(Copy, Clone)]
 pub struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
     pub top: &'a L,
     pub bottom: &'a R,
     pub mode: SplitMode,
-}
-
-/// trait representing a UI element, for a specific type of UI layout
-pub trait Element {
-    /// type to do drawing for
-    type DrawResult;
-
-    /// type to do processing for
-    type InputEvent;
-
-    /// type to return as result of processing
-    type OutputEvent;
-
-    /// draw the element
-    fn draw(&self) -> Self::DrawResult;
-
-    /// handle input
-    fn process(&self, input: Self::InputEvent) -> Self::OutputEvent;
-    
-    /// get the preferred width
-    fn preferred_width(&self, height: usize) -> Option<usize>;
-
-    /// get the preferred height
-    fn preferred_height(&self, width: usize) -> Option<usize>;
 }
 
 /// terminal rendering trait
