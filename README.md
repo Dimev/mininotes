@@ -45,7 +45,7 @@ Options
  - Ctrl+y: redo change
  - Alt+q: discard changes since last save
  
- - Ctrl+s: save changes tp file
+ - Ctrl+s: save changes to file
  
  - Alt+q: quit (does not ask for confirmation)
 
