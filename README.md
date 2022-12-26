@@ -13,7 +13,7 @@ Feel free to use this as reference for whatever you want.
  - mouse to cursor position
  - undo/redo
  - selection
- - copy/pase
+ - copy/paste
  - pageup/pagedown scroll
  - skip words navigation
 

@@ -153,7 +153,6 @@ pub fn string_width<I: IntoIterator<Item = char>>(iterator: I, tab_width: usize)
 }
 
 /// newline, as recognized by ropey, so either one of line feed, carriage return, vertical tab, form feed, next line, line separator, paragraph separator
-// TODO: char iter?
 pub fn is_newline(c: char) -> bool {
     [
         '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
@@ -185,7 +184,6 @@ pub struct GraphemePosition {
 // terminal layout ===========================================
 
 /// Layout settings, which there are none of
-// TODO: bidir?
 pub struct TermLineLayoutSettings {
     tab_width: usize,
 }
