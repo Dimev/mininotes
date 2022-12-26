@@ -948,17 +948,40 @@ impl<L: LineLayout> TextEditor<L> {
 
     /// set the cursor pos
     pub fn set_cursor_pos(&mut self, x: usize, y: usize, add_selection: bool) {
+        // manage selection
+        if add_selection {
+            self.add_selection();
+        } else {
+            self.clear_selection();
+        }
+
         // find the line
         let line = y.min(self.text.len_lines());
 
-        // find where the line start
-        let line_start = self.text.line_to_byte(line);
+        // if it's not the last line, actually move it
+        if line != self.text.len_lines() {
+            // find where the line start
+            let line_start = self.text.line_to_byte(line);
 
-        // move cursor to the right line
-        self.cursor = line_start;
+            // layout the line, and find the right grapheme that contains our column, or at least the one closest to it
+            let cursor_pos = self
+                .layout_settings
+                .layout_line(self.text.line(line))
+                .take_while(|y| y.start_column <= x)
+                .last()
+                .map(|x| line_start + x.cursor);
 
-        // and move the cursor to the right column
-        self.move_cursor_to_column(x, add_selection, true);
+            // need to do this here, otherwise the borrowchecker can't see we don't need to borrow self in line when doing move_cursor
+            if let Some(cursor) = cursor_pos {
+                self.cursor = cursor;
+            } else {
+                // otherwise, move it to the end of the line, as that would be expected
+                self.move_cursor_to_end_of_line(add_selection, true);
+            }
+        } else {
+            // else, move to the end of the text
+            self.cursor = self.text.len_bytes();
+        }
     }
 
     /// set the cursor pos, relative to scrolling
@@ -969,6 +992,15 @@ impl<L: LineLayout> TextEditor<L> {
             y + self.scroll_lines,
             add_selection,
         );
+    }
+
+    /// scroll the visible window by some amount, and ensure that visually the cursor remains on the same line
+    pub fn scroll_vertically(&mut self, amount: isize) {
+        // scroll the window
+        self.scroll_lines = self.scroll_lines.saturating_add_signed(amount);
+
+        // move the cursor
+        self.move_cursor_vertical(amount, false, false);
     }
 
     /// set the right scrolling values so the text stays in frame
@@ -1102,8 +1134,8 @@ impl Char {
     }
 }
 
-/// buffer type
-type ColoredString = Vec<Char>;
+/// buffer type + cursor position
+type TerminalBuffer = (Vec<Char>, Option<(usize, usize)>);
 
 /// type of highlight
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -1146,59 +1178,31 @@ impl Highlight {
 // ui actions ===========================================
 
 /// Enum representing an action in the UI
-/// This can be used for both in and out, as they are similar enough
+/// For a larger program, it may make more sense to have a large program struct manage this, and let the actual widgets manage the state
+/// Mininotes is small enough to not care about this
 #[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub enum UiEvent {
-    /// clicked a position
-    Clicked(usize, usize),
+    /// clicked a position, or dragged it to there
+    Clicked(usize, usize, bool),
 
-    /// dragged from and to a position
-    Dragged(usize, usize, usize, usize),
+    /// scroll an entire page, bool is for up (true) or down
+    ScrollPage(bool),
 
-    /// inserted a character
-    Insert(char),
+    /// do nothing
+    Nothing,
+}
 
-    /// insert newline
-    InsertNewline,
+/// reaction that comes back from the ui
+#[derive(Copy, Clone)]
+pub enum UiReaction {
+    /// fix scrolling
+    FixScrol(usize, usize),
 
-    /// backspace
-    Backspace,
+    /// set the real cursor position in the editor
+    SetRelativeCursorPos(usize, usize, bool),
 
-    /// delete
-    Delete,
-
-    /// undo
-    Undo,
-
-    /// redo
-    Redo,
-
-    /// copy
-    Copy,
-
-    /// paste
-    Paste,
-
-    /// cut
-    Cut,
-
-    /// system clipboard copy
-    SysCopy,
-
-    /// system clipboard paste
-    SysPaste,
-
-    /// system clipboard cut
-    SysCut,
-
-    /// discard changes
-    Discard,
-
-    /// save changes
-    Save,
-
-    /// quit
-    Quit,
+    /// scroll by some amount
+    ScrollBy(isize),
 }
 
 // ui layout/terminal drawing ===========================
@@ -1489,32 +1493,35 @@ pub trait OutputResult {
 
 /// implement the traits for the widgets of mininotes ====================
 
-impl<'a> Drawable<ColoredString> for TextLine<'a> {
-    fn draw(&self, width: u32, height: u32) -> ColoredString {
+impl<'a> Drawable<TerminalBuffer> for TextLine<'a> {
+    fn draw(&self, width: u32, height: u32) -> TerminalBuffer {
         // simply add extra padding
-        self.string
-            .chars()
-            .chain(std::iter::repeat(' '))
-            .scan(0, |acc, x| {
-                *acc += string_width(std::iter::once(x), TERM_TAB_WIDTH);
-                if *acc <= width as usize * height as usize {
-                    Some(x)
-                } else {
-                    None
-                }
-            })
-            .map(|c| Char::new(c, Highlight::Status))
-            .collect()
+        (
+            self.string
+                .chars()
+                .chain(std::iter::repeat(' '))
+                .scan(0, |acc, x| {
+                    *acc += string_width(std::iter::once(x), TERM_TAB_WIDTH);
+                    if *acc <= width as usize * height as usize {
+                        Some(x)
+                    } else {
+                        None
+                    }
+                })
+                .map(|c| Char::new(c, Highlight::Status))
+                .collect(),
+            None,
+        )
     }
 }
 
-impl<'a> Interactive<UiEvent, Vec<UiEvent>> for TextLine<'a> {
-    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiEvent> {
+impl<'a> Interactive<UiEvent, Vec<UiReaction>> for TextLine<'a> {
+    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiReaction> {
         Vec::new()
     }
 }
 
-impl<'a> Widget<ColoredString, UiEvent, Vec<UiEvent>> for TextLine<'a> {
+impl<'a> Widget<TerminalBuffer, UiEvent, Vec<UiReaction>> for TextLine<'a> {
     fn minimum_size(&self, _: u32, _: u32) -> (u32, u32) {
         (string_width(self.string.chars(), TERM_TAB_WIDTH) as u32, 1)
     }
@@ -1524,10 +1531,10 @@ impl<'a> Widget<ColoredString, UiEvent, Vec<UiEvent>> for TextLine<'a> {
     }
 }
 
-impl Drawable<ColoredString> for LineNumbers {
-    fn draw(&self, width: u32, height: u32) -> ColoredString {
+impl Drawable<TerminalBuffer> for LineNumbers {
+    fn draw(&self, width: u32, height: u32) -> TerminalBuffer {
         // buffer to add to
-        let mut buffer = ColoredString::with_capacity(width as usize * height as usize);
+        let mut buffer = Vec::with_capacity(width as usize * height as usize);
 
         // figure out the max number padding
         let padding = self.width_number(height as usize);
@@ -1607,17 +1614,17 @@ impl Drawable<ColoredString> for LineNumbers {
         );
 
         // return
-        buffer
+        (buffer, None)
     }
 }
 
-impl Interactive<UiEvent, Vec<UiEvent>> for LineNumbers {
-    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiEvent> {
+impl Interactive<UiEvent, Vec<UiReaction>> for LineNumbers {
+    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiReaction> {
         Vec::new()
     }
 }
 
-impl Widget<ColoredString, UiEvent, Vec<UiEvent>> for LineNumbers {
+impl Widget<TerminalBuffer, UiEvent, Vec<UiReaction>> for LineNumbers {
     fn minimum_size(&self, _: u32, height: u32) -> (u32, u32) {
         (self.width(height as usize) as u32, height)
     }
@@ -1627,10 +1634,10 @@ impl Widget<ColoredString, UiEvent, Vec<UiEvent>> for LineNumbers {
     }
 }
 
-impl Drawable<ColoredString> for TextEditor<TermLineLayoutSettings> {
-    fn draw(&self, width: u32, height: u32) -> ColoredString {
+impl Drawable<TerminalBuffer> for TextEditor<TermLineLayoutSettings> {
+    fn draw(&self, width: u32, height: u32) -> TerminalBuffer {
         // all found text lines
-        let mut buffer = ColoredString::with_capacity(width as usize * height as usize);
+        let mut buffer = Vec::with_capacity(width as usize * height as usize);
 
         // selection range, empty if none exists
         let selection_range = self.get_selection_range().unwrap_or(0..0);
@@ -1725,17 +1732,65 @@ impl Drawable<ColoredString> for TextEditor<TermLineLayoutSettings> {
             );
         }
 
-        buffer
+        // relative cursor position
+        let cursor_pos = self.get_relative_cursor_pos();
+
+        // and return the buffer with the cursor position)
+        (buffer, cursor_pos)
     }
 }
 
-impl Interactive<UiEvent, Vec<UiEvent>> for TextEditor<TermLineLayoutSettings> {
-    fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiEvent> {
-        Vec::new()
+impl Interactive<UiEvent, Vec<UiReaction>> for TextEditor<TermLineLayoutSettings> {
+    fn interact(
+        &self,
+        event: &UiEvent,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Vec<UiReaction> {
+        let extra = match event {
+            // make sure the position is clicked correctly
+            UiEvent::Clicked(cx, cy, select) => {
+                // click position
+                let (click_x, click_y) = (*cx as isize - x as isize, *cy as isize - y as isize);
+
+                // only return it if it's in bounds
+                if click_x >= 0
+                    && click_x < width as isize
+                    && click_y >= 0
+                    && click_y < height as isize
+                {
+                    Some(UiReaction::SetRelativeCursorPos(
+                        click_x as usize,
+                        click_y as usize,
+                        *select,
+                    ))
+                } else {
+                    None
+                }
+            }
+
+            // scroll up
+            UiEvent::ScrollPage(up) => Some(if *up {
+                UiReaction::ScrollBy(-(height as isize))
+            } else {
+                UiReaction::ScrollBy(height as isize)
+            }),
+
+            // rest means no extra reaction
+            _ => None,
+        };
+
+        // and emit the  right events
+        [UiReaction::FixScrol(width as usize, height as usize)]
+            .into_iter()
+            .chain(extra.into_iter())
+            .collect()
     }
 }
 
-impl Widget<ColoredString, UiEvent, Vec<UiEvent>> for TextEditor<TermLineLayoutSettings> {
+impl Widget<TerminalBuffer, UiEvent, Vec<UiReaction>> for TextEditor<TermLineLayoutSettings> {
     fn minimum_size(&self, width: u32, height: u32) -> (u32, u32) {
         (width, height)
     }
@@ -1745,7 +1800,7 @@ impl Widget<ColoredString, UiEvent, Vec<UiEvent>> for TextEditor<TermLineLayoutS
     }
 }
 
-impl OutputResult for Vec<UiEvent> {
+impl OutputResult for Vec<UiReaction> {
     fn empty() -> Self {
         Vec::new()
     }
@@ -1755,28 +1810,35 @@ impl OutputResult for Vec<UiEvent> {
     }
 }
 
-impl DrawResult for ColoredString {
+impl DrawResult for TerminalBuffer {
     fn empty(width: u32, height: u32) -> Self {
-        std::iter::repeat(Char::new_text(' ', false))
-            .take(width as usize * height as usize)
-            .collect()
+        (
+            std::iter::repeat(Char::new_text(' ', false))
+                .take(width as usize * height as usize)
+                .collect(),
+            None,
+        )
     }
 
-    fn combine_vertical(self, other: Self, _: u32, _: u32, _: u32) -> Self {
-        // and just stitch them together
-        self.iter().chain(other.iter()).copied().collect()
+    fn combine_vertical(self, other: Self, _: u32, split: u32, _: u32) -> Self {
+        (
+            // stitch together
+            self.0.iter().chain(other.0.iter()).copied().collect(),
+            // pick one, and adjust for size
+            self.1.or(other.1.map(|(x, y)| (x, y + split as usize))),
+        )
     }
 
     fn combine_horizontal(self, other: Self, width: u32, split: u32, _: u32) -> Self {
         // iterator over the buffers
-        let mut left_chars = self.iter();
-        let mut right_chars = other.iter();
+        let mut left_chars = self.0.iter();
+        let mut right_chars = other.0.iter();
 
         // current column
         let mut column = 0;
 
         // string to generate
-        let mut buffer = ColoredString::with_capacity(self.len() + other.len());
+        let mut buffer = Vec::with_capacity(self.0.len() + other.0.len());
 
         // and add the lines together
         while let Some(character) = if column < split as usize {
@@ -1796,7 +1858,11 @@ impl DrawResult for ColoredString {
             buffer.push(*character);
         }
 
-        buffer
+        (
+            buffer,
+            // adjust for size
+            self.1.or(other.1.map(|(x, y)| (x + split as usize, y))),
+        )
     }
 }
 
@@ -1866,10 +1932,9 @@ pub fn update_and_render_to_buffer(
     width: usize,
     height: usize,
     filepath: &PathBuf,
-    clipboard: &mut Clipboard,
     relative_line_numbers: bool,
     event: UiEvent,
-) -> (ColoredString, Option<(usize, usize)>) {
+) -> TerminalBuffer {
     // get the editor cursor pos
     let (pos_x, pos_y) = {
         let (x, y) = editor.get_row_and_column();
@@ -1897,19 +1962,19 @@ pub fn update_and_render_to_buffer(
         .add_item(editor, Align::Left, Restriction::Grow)
         .interact(&event);
 
-    // layout, and draw
+    // see what happened in all events
+    // in reverse to order the events right
+    for event in events.into_iter().rev() {
+        match event {
+            UiReaction::ScrollBy(amount) => editor.scroll_vertically(amount),
+            UiReaction::FixScrol(x, y) => editor.set_scroll(x, y, 6, 6),
+            UiReaction::SetRelativeCursorPos(x, y, select) => {
+                editor.set_relative_cursor_pos(x, y, select)
+            }
+        }
+    }
 
-    todo!()
-}
-
-/// render the editor to a buffer
-pub fn render_editor_to_buffer(
-    editor: &TextEditor<TermLineLayoutSettings>,
-    width: usize,
-    height: usize,
-    filename: &str,
-    relative_line_numbers: bool,
-) -> (ColoredString, Option<(usize, usize)>) {
+    // remake this, as it might have changed
     let lines = LineNumbers::new(
         editor.get_first_visible_line(),
         editor.len_lines(),
@@ -1917,36 +1982,15 @@ pub fn render_editor_to_buffer(
         relative_line_numbers,
     );
 
-    let status_line = format!(
-        " {}{} {}:{}",
-        filename,
-        if editor.has_changed_since_save() {
-            "*"
-        } else {
-            ""
-        },
-        editor.get_row_and_column().0 + 1,
-        editor.get_row_and_column().1 + 1,
-    );
+    // again, draw this time
+    let buffer = Layout::new(width as u32, height as u32)
+        .add_item(&status_bar, Align::Bottom, Restriction::Shrink)
+        .add_item(&lines, Align::Left, Restriction::Shrink)
+        .add_item(editor, Align::Left, Restriction::Grow)
+        .draw();
 
-    // cursor position
-    let cursor_pos = editor
-        .get_relative_cursor_pos()
-        .map(|(x, y)| (x + lines.width(height), y));
-
-    // and simply perform layout
-    (
-        Layout::new(width as u32, height as u32)
-            .add_item(
-                &TextLine::new(&status_line),
-                Align::Bottom,
-                Restriction::Shrink,
-            )
-            .add_item(&lines, Align::Left, Restriction::Shrink)
-            .add_item(editor, Align::Left, Restriction::Grow)
-            .draw(),
-        cursor_pos,
-    )
+    // and return
+    buffer
 }
 
 /// render to the terminal, with differencing to not redraw the whole screen
@@ -2087,12 +2131,13 @@ fn terminal_main(
     let mut system_clip = Clipboard::new().ok();
 
     // draw beforehand
-    let (mut current_buffer, cursor_position) = render_editor_to_buffer(
-        &editor,
+    let (mut current_buffer, cursor_position) = update_and_render_to_buffer(
+        &mut editor,
         width as usize,
         height as usize,
-        &save_path.to_string_lossy(),
+        &save_path,
         relative_line_numbers,
+        UiEvent::Nothing,
     );
 
     // and render to the terminal
@@ -2104,24 +2149,23 @@ fn terminal_main(
             // input
             match read().unwrap() {
                 Event::Mouse(MouseEvent {
-                    row,
-                    column,
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    ..
-                }) => {
-                    // mouse move
-                    editor.set_relative_cursor_pos(column as usize, row as usize, false);
-
-                    // fix scrolling before rendering
-                    editor.set_scroll(width as usize, height as usize, 6, 6);
-
+                    row, column, kind, ..
+                }) if !disable_mouse_interaction
+                    && (kind == MouseEventKind::Down(MouseButton::Left)
+                        || kind == MouseEventKind::Drag(MouseButton::Left)) =>
+                {
                     // render
-                    let (next_buffer, cursor_position) = render_editor_to_buffer(
-                        &editor,
+                    let (next_buffer, cursor_position) = update_and_render_to_buffer(
+                        &mut editor,
                         width as usize,
                         height as usize,
-                        &save_path.to_string_lossy(),
+                        &save_path,
                         relative_line_numbers,
+                        UiEvent::Clicked(
+                            column as usize,
+                            row as usize,
+                            kind == MouseEventKind::Drag(MouseButton::Left),
+                        ),
                     );
 
                     // and render to the terminal
@@ -2141,6 +2185,9 @@ fn terminal_main(
                     if code == KeyCode::Char('q') && modifiers == KeyModifiers::ALT {
                         break;
                     }
+
+                    // the ui event to send for updating
+                    let mut ui_event = UiEvent::Nothing;
 
                     // saving
                     if code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
@@ -2227,6 +2274,10 @@ fn terminal_main(
                         editor.move_cursor_to_start_of_line(modifiers == KeyModifiers::SHIFT, true);
                     } else if code == KeyCode::End {
                         editor.move_cursor_to_end_of_line(modifiers == KeyModifiers::SHIFT, true);
+                    } else if code == KeyCode::PageUp {
+                        ui_event = UiEvent::ScrollPage(true);
+                    } else if code == KeyCode::PageDown {
+                        ui_event = UiEvent::ScrollPage(false);
                     }
                     // insert text
                     else if let KeyCode::Char(c) = code {
@@ -2243,19 +2294,15 @@ fn terminal_main(
                         editor.remove_character_or_selection_at_cursor(false);
                     }
 
-                    // fix scrolling before rendering
-                    // TODO: fix in render step
-                    editor.set_scroll(width as usize, height as usize, 6, 6);
-
                     // render
-                    let (next_buffer, cursor_position) = render_editor_to_buffer(
-                        &editor,
+                    let (next_buffer, cursor_position) = update_and_render_to_buffer(
+                        &mut editor,
                         width as usize,
                         height as usize,
-                        &save_path.to_string_lossy(),
+                        &save_path,
                         relative_line_numbers,
+                        ui_event,
                     );
-
                     // and render to the terminal
                     render(
                         width as usize,
@@ -2271,18 +2318,15 @@ fn terminal_main(
                     width = terminal::size().unwrap().0;
                     height = terminal::size().unwrap().1;
 
-                    // fix cursor pos
-                    editor.set_scroll(width as usize, height as usize, 6, 6);
-
                     // render
-                    let (next_buffer, cursor_position) = render_editor_to_buffer(
-                        &editor,
+                    let (next_buffer, cursor_position) = update_and_render_to_buffer(
+                        &mut editor,
                         width as usize,
                         height as usize,
-                        &save_path.to_string_lossy(),
+                        &save_path,
                         relative_line_numbers,
+                        UiEvent::Nothing,
                     );
-
                     // and render to the terminal
                     render(width as usize, cursor_position, &next_buffer, &[]);
 
