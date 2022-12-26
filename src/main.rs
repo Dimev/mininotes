@@ -1061,6 +1061,18 @@ impl LineNumbers {
     }
 }
 
+// status bar ============================================
+
+pub struct TextLine<'a> {
+    string: &'a str,
+}
+
+impl<'a> TextLine<'a> {
+    pub fn new(string: &'a str) -> Self {
+        Self { string }
+    }
+}
+
 // terminal ==============================================
 
 /// character type
@@ -1191,13 +1203,6 @@ pub enum UiEvent {
 
 // ui layout/terminal drawing ===========================
 
-// TODO: figure out a better way to do this
-// a good way of doing it:
-// provide a layout struct
-// this struct keeps track of remaining area
-// it also manages all rendering/interaction
-// similar to tui, and handles some things better hopefully
-
 /// Layout align
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Align {
@@ -1295,23 +1300,23 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
             let (new_x, new_y, new_width, new_height) = (
                 // the lowest position is the new origin
                 x.min(item.x),
-                y.min(item.x),
+                y.min(item.y),
                 // if one of these changed, the width/height for that axis also changed
-                if item.x != x {
+                if item.x != x || width == 0 {
                     item.width + width
                 } else {
-                    width
+                    item.width
                 },
-                if item.y != y {
+                if item.y != y || height == 0 {
                     item.height + height
                 } else {
-                    height
+                    item.height
                 },
             );
 
             // figure out how to combine it with the current state
             // because we can guarantee we only expand to either one of the sides, this can be done somewhat easily
-            if item.x > x {
+            if item.x > x || width == 0 {
                 // expand to the right
                 result = result.combine_horizontal(
                     item.widget.draw(item.width, item.height),
@@ -1325,22 +1330,20 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
                     .widget
                     .draw(item.width, item.height)
                     .combine_horizontal(result, new_width, item.width, new_height);
-            } else if item.y > y {
-                // expand to the bottom
+            } else if item.y > y || height == 0 {
+                // expand to the top
                 result = result.combine_vertical(
                     item.widget.draw(item.width, item.height),
-                    new_width,
-                    height,
-                    new_height,
-                );
-            } else if item.y < y {
-                // expand to the top
-                result = item.widget.draw(item.width, item.height).combine_vertical(
-                    result,
                     new_width,
                     item.height,
                     new_height,
                 );
+            } else if item.y < y {
+                // expand to the bottom
+                result = item
+                    .widget
+                    .draw(item.width, item.height)
+                    .combine_vertical(result, new_width, height, new_height);
             }
 
             // set the new sizes
@@ -1356,6 +1359,8 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
 
     /// add an item to the UI layout
     /// This is intended to work via the builder pattern, so it consumes self, and returns a modified version
+    /// It might also be possible to have an "add multiple", that accepts a list of items and lays them out horizontally/vertically
+    /// This isn't needed for mininotes, so not implemented
     pub fn add_item(
         mut self,
         item: &'a dyn Widget<R, I, O>,
@@ -1402,20 +1407,6 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
             Align::Right => (self.space.2 - widget_width, self.space.1),
         };
 
-        // resize the available space
-        // if the widget is positioned at the available space corner, it needs to move over by the widget size
-        // otherwise, the other end of the corner needs to move to the widget corner, as it is now filled
-        if widget_x == self.space.0 {
-            self.space.0 = widget_x + widget_width
-        } else {
-            self.space.2 = widget_x
-        }
-        if widget_y == self.space.1 {
-            self.space.1 = widget_y + widget_height
-        } else {
-            self.space.3 = widget_y
-        }
-
         // add the widget
         self.items.push(LayoutItem {
             x: widget_x,
@@ -1424,6 +1415,26 @@ impl<'a, R: DrawResult, I, O: OutputResult> Layout<'a, R, I, O> {
             height: widget_height,
             widget: item,
         });
+
+        // resize the available space
+        match align {
+            Align::Top => {
+                // widget fills top bar, moves down
+                self.space.1 += widget_height;
+            }
+            Align::Bottom => {
+                // widget fills bottom bar, moves up
+                self.space.3 -= widget_height;
+            }
+            Align::Left => {
+                // widget fills left bar, moves right
+                self.space.0 += widget_width;
+            }
+            Align::Right => {
+                // widget fills right bar, moves left
+                self.space.2 -= widget_width;
+            }
+        }
 
         // return
         self
@@ -1504,8 +1515,8 @@ impl<'a> Interactive<UiEvent, Vec<UiEvent>> for TextLine<'a> {
 }
 
 impl<'a> Widget<ColoredString, UiEvent, Vec<UiEvent>> for TextLine<'a> {
-    fn minimum_size(&self, width: u32, height: u32) -> (u32, u32) {
-        (1, 1)
+    fn minimum_size(&self, _: u32, _: u32) -> (u32, u32) {
+        (string_width(self.string.chars(), TERM_TAB_WIDTH) as u32, 1)
     }
 
     fn maximum_size(&self, width: u32, height: u32) -> (u32, u32) {
@@ -1603,6 +1614,16 @@ impl Drawable<ColoredString> for LineNumbers {
 impl Interactive<UiEvent, Vec<UiEvent>> for LineNumbers {
     fn interact(&self, _: &UiEvent, _: u32, _: u32, _: u32, _: u32) -> Vec<UiEvent> {
         Vec::new()
+    }
+}
+
+impl Widget<ColoredString, UiEvent, Vec<UiEvent>> for LineNumbers {
+    fn minimum_size(&self, _: u32, height: u32) -> (u32, u32) {
+        (self.width(height as usize) as u32, height)
+    }
+
+    fn maximum_size(&self, _: u32, height: u32) -> (u32, u32) {
+        (self.width(height as usize) as u32, height)
     }
 }
 
@@ -1714,6 +1735,16 @@ impl Interactive<UiEvent, Vec<UiEvent>> for TextEditor<TermLineLayoutSettings> {
     }
 }
 
+impl Widget<ColoredString, UiEvent, Vec<UiEvent>> for TextEditor<TermLineLayoutSettings> {
+    fn minimum_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (width, height)
+    }
+
+    fn maximum_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (width, height)
+    }
+}
+
 impl OutputResult for Vec<UiEvent> {
     fn empty() -> Self {
         Vec::new()
@@ -1769,492 +1800,8 @@ impl DrawResult for ColoredString {
     }
 }
 
-// TODO: trait to convert element into a widget
-
-/// pane split left and right
-#[derive(Copy, Clone)]
-pub struct VerticalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
-    left: &'a L,
-    right: &'a R,
-    mode: SplitMode,
-}
-
-/// pane split top and bottom
-#[derive(Copy, Clone)]
-pub struct HorizontalPane<'a, L: TerminalBuffer, R: TerminalBuffer> {
-    pub top: &'a L,
-    pub bottom: &'a R,
-    pub mode: SplitMode,
-}
-
-/// terminal rendering trait
-pub trait TerminalBuffer: Sized {
-    /// Get the buffer of this size
-    /// This has to guarantee the buffer is of this exact size
-    fn get_buffer(&self, width: usize, height: usize) -> ColoredString;
-
-    /// preferred width, from a given height
-    fn preferred_width(&self, height: usize) -> Option<usize>;
-
-    /// preferred height, from a given width
-    fn preferred_height(&self, width: usize) -> Option<usize>;
-
-    /// Compose a buffer to the other side
-    fn left_of<'a, T: TerminalBuffer>(
-        &'a self,
-        other: &'a T,
-        mode: SplitMode,
-    ) -> VerticalPane<'a, Self, T> {
-        VerticalPane {
-            left: self,
-            right: other,
-            mode,
-        }
-    }
-
-    /// Compose a buffer to the other side
-    fn right_of<'a, T: TerminalBuffer>(
-        &'a self,
-        other: &'a T,
-        mode: SplitMode,
-    ) -> VerticalPane<'a, T, Self> {
-        VerticalPane {
-            left: other,
-            right: self,
-            mode: mode.reverse(),
-        }
-    }
-
-    /// Compose a buffer to the other side
-    fn top_of<'a, T: TerminalBuffer>(
-        &'a self,
-        other: &'a T,
-        mode: SplitMode,
-    ) -> HorizontalPane<'a, Self, T> {
-        HorizontalPane {
-            top: self,
-            bottom: other,
-            mode,
-        }
-    }
-
-    /// Compose a buffer to the other side
-    fn bottom_of<'a, T: TerminalBuffer>(
-        &'a self,
-        other: &'a T,
-        mode: SplitMode,
-    ) -> HorizontalPane<'a, T, Self> {
-        HorizontalPane {
-            top: other,
-            bottom: self,
-            mode: mode.reverse(),
-        }
-    }
-}
-
-/// mode on how to treat split layout
-#[derive(Copy, Clone)]
-pub enum SplitMode {
-    /// Uses the preferred size of the left panel, or split halfway through the middle otherwise
-    PreferLeft,
-
-    /// Uses the preferred size of the right panel, or split halfway through the middle otherwise
-    PreferRight,
-
-    /// Show based on a split ratio, 0-1
-    Ratio(f32),
-
-    /// Guarantee the left side is at most this wide, when possible
-    ExactLeft(usize),
-
-    /// Guarantee the right side is at most this wide, when possible
-    ExactRight(usize),
-}
-
-impl SplitMode {
-    /// reverses the split mode, so you can swap the arguments
-    pub fn reverse(self) -> Self {
-        match self {
-            Self::Ratio(x) => Self::Ratio(1.0 - x),
-            Self::ExactLeft(x) => Self::ExactRight(x),
-            Self::ExactRight(x) => Self::ExactLeft(x),
-            Self::PreferLeft => Self::PreferRight,
-            Self::PreferRight => Self::PreferLeft,
-        }
-    }
-
-    /// returns the calculated split value
-    pub fn get_split(
-        self,
-        total: usize,
-        preferrred_left: Option<usize>,
-        preferred_right: Option<usize>,
-    ) -> usize {
-        match self {
-            SplitMode::Ratio(x) => ((total as f32 * x) as usize).min(total),
-            SplitMode::ExactLeft(x) => x.min(total),
-            SplitMode::ExactRight(x) => total.saturating_sub(x),
-            SplitMode::PreferLeft => preferrred_left.unwrap_or(total / 2).min(total),
-            SplitMode::PreferRight => preferred_right
-                .map(|x| total.saturating_sub(x))
-                .unwrap_or(total / 2)
-                .min(total),
-        }
-    }
-}
-
-// TODO: mutable splits, as well as the ability to get the cursor position, run functions etc
-
-impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for HorizontalPane<'a, L, R> {
-    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
-        // figure out the correct split
-        let split = self.mode.get_split(
-            height,
-            self.top.preferred_height(width),
-            self.bottom.preferred_height(width),
-        );
-
-        // get the buffers of the right size
-        let top = self.top.get_buffer(width, split);
-        let bottom = self.bottom.get_buffer(width, height - split);
-
-        // and just stitch them together
-        top.iter().chain(bottom.iter()).copied().collect()
-    }
-
-    fn preferred_width(&self, height: usize) -> Option<usize> {
-        match self.mode {
-            SplitMode::PreferLeft => self.top.preferred_width(height),
-            SplitMode::PreferRight => self.bottom.preferred_width(height),
-            _ => None,
-        }
-    }
-
-    fn preferred_height(&self, width: usize) -> Option<usize> {
-        match self.mode {
-            // prefer the sum of both heights
-            SplitMode::PreferLeft | SplitMode::PreferRight => self
-                .top
-                .preferred_height(width)
-                .map(|x| self.bottom.preferred_height(width).map(|y| x.max(y)))
-                .flatten(),
-            _ => None,
-        }
-    }
-}
-
-impl<'a, L: TerminalBuffer, R: TerminalBuffer> TerminalBuffer for VerticalPane<'a, L, R> {
-    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
-        // figure out the correct split
-        let split = self.mode.get_split(
-            width,
-            self.left.preferred_width(height),
-            self.right.preferred_width(height),
-        );
-
-        // get the buffers
-        let left = self.left.get_buffer(split, height);
-        let right = self.right.get_buffer(width - split, height);
-
-        let mut left_chars = left.iter();
-        let mut right_chars = right.iter();
-
-        // current column
-        let mut column = 0;
-
-        // string to generate
-        let mut buffer = ColoredString::with_capacity(left.len() + right.len());
-
-        // and add the lines together
-        while let Some(character) = if column < split {
-            left_chars.next()
-        } else {
-            right_chars.next()
-        } {
-            // add to the column
-            column += string_width(std::iter::once(character.c), TERM_TAB_WIDTH);
-
-            // wrap if it's on the next line
-            if column >= width {
-                column -= width;
-            }
-
-            // push it
-            buffer.push(*character);
-        }
-
-        buffer
-    }
-
-    fn preferred_height(&self, width: usize) -> Option<usize> {
-        match self.mode {
-            SplitMode::PreferLeft => self.left.preferred_height(width),
-            SplitMode::PreferRight => self.right.preferred_height(width),
-            _ => None,
-        }
-    }
-
-    fn preferred_width(&self, height: usize) -> Option<usize> {
-        match self.mode {
-            // prefer the sum of both widths
-            SplitMode::PreferLeft | SplitMode::PreferRight => self
-                .left
-                .preferred_width(height)
-                .map(|x| self.right.preferred_width(height).map(|y| x.max(y)))
-                .flatten(),
-            _ => None,
-        }
-    }
-}
-
-pub struct TextLine<'a> {
-    string: &'a str,
-}
-
-impl<'a> TextLine<'a> {
-    pub fn new(string: &'a str) -> Self {
-        Self { string }
-    }
-}
-
-impl<'a> TerminalBuffer for TextLine<'a> {
-    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
-        // simply add extra padding
-        self.string
-            .chars()
-            .chain(std::iter::repeat(' '))
-            .scan(0, |acc, x| {
-                *acc += string_width(std::iter::once(x), TERM_TAB_WIDTH);
-                if *acc <= width * height {
-                    Some(x)
-                } else {
-                    None
-                }
-            })
-            .map(|c| Char::new(c, Highlight::Status))
-            .collect()
-    }
-
-    fn preferred_width(&self, _: usize) -> Option<usize> {
-        // prefer to fit enough on here
-        Some(string_width(self.string.chars(), TERM_TAB_WIDTH))
-    }
-
-    fn preferred_height(&self, _: usize) -> Option<usize> {
-        // prefer to fit enough on here
-        Some(1)
-    }
-}
-
-impl TerminalBuffer for LineNumbers {
-    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
-        // buffer to add to
-        let mut buffer = ColoredString::with_capacity(width * height);
-
-        // figure out the max number padding
-        let padding = self.width_number(height);
-
-        // figure out the number of spaces to pad at the front
-        let space_padding = width.saturating_sub(padding + 1).max(1);
-
-        // lines to show, start and end
-        let start = self.start + 1;
-        let end = (self.start + 1 + height).min(self.total + 1);
-
-        // add the line numbers
-        for line in start..end {
-            // current column
-            let mut column = 0;
-
-            // push starting space
-            while column < width.min(space_padding) {
-                buffer.push(Char::new(' ', Highlight::Gutter));
-                column += 1;
-            }
-
-            // get the start number
-            let mut base = (10 as usize).pow(padding.saturating_sub(1) as u32);
-
-            // get the line number
-            let line_number = if self.relative && line != self.current {
-                // difference if we are not on the same line
-                line.abs_diff(self.current)
-            } else {
-                line
-            };
-
-            // go as long as it's > 0, calculate the number to show
-            while base > 0 && column < width {
-                // see if we need to show a number
-                if line_number / base > 0 {
-                    // something, get the digit
-                    let digit = (line_number / base) % 10;
-
-                    // get it as char
-                    let character = char::from_digit(digit as u32, 10).unwrap();
-
-                    // push it
-                    buffer.push(Char::new(character, Highlight::Gutter));
-                } else {
-                    // nothing, show a space
-                    buffer.push(Char::new(' ', Highlight::Gutter));
-                }
-
-                // next base
-                base /= 10;
-
-                // next column
-                column += 1;
-            }
-
-            // push remaining space, if any can fit
-            if column < width {
-                buffer.push(Char::new(' ', Highlight::Gutter));
-            }
-        }
-
-        // and the rest
-        buffer.extend(
-            // generate the ~, over and over
-            std::iter::repeat((0..width).map(|x| {
-                if x == padding {
-                    Char::new('~', Highlight::Gutter)
-                } else {
-                    Char::new(' ', Highlight::Gutter)
-                }
-            }))
-            // for the remaining lines
-            .take(height.saturating_sub(end - start))
-            .flatten(),
-        );
-
-        // return
-        buffer
-    }
-
-    // wide enough to fit our line numbers
-    fn preferred_width(&self, height: usize) -> Option<usize> {
-        Some(self.width(height))
-    }
-
-    // don't prefer
-    fn preferred_height(&self, _: usize) -> Option<usize> {
-        None
-    }
-}
-
-impl TerminalBuffer for &TextEditor<TermLineLayoutSettings> {
-    /// get the currently visible buffer, as a list of lines
-    /// this is assuming a terminal editor, and should not be used when doing a gui editor
-    fn get_buffer(&self, width: usize, height: usize) -> ColoredString {
-        // all found text lines
-        let mut buffer = ColoredString::with_capacity(width * height);
-
-        // selection range, empty if none exists
-        let selection_range = self.get_selection_range().unwrap_or(0..0);
-
-        // go over all lines in the buffer
-        for line_num in self.scroll_lines..self.scroll_lines + height {
-            // current column
-            let mut column = 0;
-
-            // current cursor in the column
-            let mut cursor = 0;
-
-            // get the line
-            if let Some(line) = self.text.get_line(line_num) {
-                // where in the buffer the line is
-                let line_start = self.text.line_to_byte(line_num);
-
-                // go over all columns until we are either out of bounds or end of the line
-                while cursor < line.len_bytes() && column < self.scroll_columns + width {
-                    // get the next cursor pos
-                    let next_cursor = move_grapheme(1, cursor, line);
-
-                    // get the grapheme
-                    let grapheme = line.byte_slice(cursor..next_cursor);
-
-                    // stop if it's a newline
-                    if grapheme.chars().any(|x| is_newline(x)) {
-                        // if there's still room on the line, mark this as selected, if that's the case
-                        if column >= self.scroll_columns
-                            && column + 1 <= self.scroll_columns + width
-                            && selection_range.contains(&(cursor + line_start))
-                        {
-                            // add to the buffer
-                            buffer.push(Char::new(' ', Highlight::Selection));
-
-                            // move over a column
-                            column += 1;
-                        }
-
-                        // and stop, so the rest of the line is empty
-                        break;
-                    }
-
-                    // get the grapheme width
-                    let grapheme_width = string_width(grapheme.chars(), self.tab_width);
-
-                    // if it doesn't fit in the buffer, pad spaces
-                    if column < self.scroll_columns && column + grapheme_width > self.scroll_columns
-                    {
-                        buffer.extend(
-                            std::iter::repeat(Char::new_text(' ', false))
-                                .take(column + grapheme_width - self.scroll_columns),
-                        );
-
-                    // if we exceed the line, pad spaces instead
-                    } else if column + grapheme_width > self.scroll_columns + width {
-                        buffer.extend(
-                            std::iter::repeat(Char::new_text(' ', false))
-                                .take(self.scroll_columns + width - column),
-                        );
-
-                    // otherwise, add spaces if it's a tab
-                    } else if column >= self.scroll_columns
-                        && column + grapheme_width <= self.scroll_columns + width
-                        && grapheme.chars().eq(std::iter::once('\t'))
-                    {
-                        buffer.extend(std::iter::repeat(' ').take(self.tab_width).map(|x| {
-                            Char::new_text(x, selection_range.contains(&(cursor + line_start)))
-                        }));
-
-                    // otherwise, add characters
-                    } else if column >= self.scroll_columns
-                        && column + grapheme_width <= self.scroll_columns + width
-                    {
-                        buffer.extend(grapheme.chars().map(|x| {
-                            Char::new_text(x, selection_range.contains(&(cursor + line_start)))
-                        }));
-                    }
-
-                    // update
-                    cursor = next_cursor;
-                    column += grapheme_width;
-                }
-            }
-
-            // final padding
-            buffer.extend(std::iter::repeat(Char::new_text(' ', false)).take(
-                (width + self.scroll_columns).saturating_sub(column.max(self.scroll_columns)),
-            ));
-        }
-
-        buffer
-    }
-
-    // don't prefer
-    fn preferred_width(&self, _: usize) -> Option<usize> {
-        None
-    }
-
-    fn preferred_height(&self, _: usize) -> Option<usize> {
-        None
-    }
-}
-
 /// setup the terminal
-pub fn setup_terminal() {
+pub fn setup_terminal(disable_mouse_interaction: bool) {
     // set panic hook
     std::panic::set_hook(Box::new(|info| {
         // clean up the terminal
@@ -2279,12 +1826,15 @@ pub fn setup_terminal() {
         cursor::SavePosition,
         // so it won't clutter other activities
         terminal::EnterAlternateScreen,
-        // allow mouse usage
-        EnableMouseCapture,
         // change cursor to a bar, as that's more clear
         cursor::SetCursorShape(CursorShape::Line),
     )
     .unwrap();
+
+    // allow mouse usage
+    if !disable_mouse_interaction {
+        execute!(stdout(), EnableMouseCapture).unwrap();
+    }
 }
 
 /// clean up the terminal
@@ -2308,6 +1858,48 @@ pub fn cleanup_terminal(message: &str) {
     terminal::disable_raw_mode().unwrap();
 
     println!("{}", message);
+}
+
+/// update internal editor state, and render to a buffer
+pub fn update_and_render_to_buffer(
+    editor: &mut TextEditor<TermLineLayoutSettings>,
+    width: usize,
+    height: usize,
+    filepath: &PathBuf,
+    clipboard: &mut Clipboard,
+    relative_line_numbers: bool,
+    event: UiEvent,
+) -> (ColoredString, Option<(usize, usize)>) {
+    // get the editor cursor pos
+    let (pos_x, pos_y) = {
+        let (x, y) = editor.get_row_and_column();
+        (x + 1, y + 1)
+    };
+
+    // make all the needed widgets
+    let lines = LineNumbers::new(
+        editor.get_first_visible_line(),
+        editor.len_lines(),
+        editor.get_current_line() + 1,
+        relative_line_numbers,
+    );
+    let status_bar_text = format!(
+        " {}{} {pos_x}:{pos_y}",
+        filepath.to_string_lossy(),
+        editor.has_changed_since_save().then_some("*").unwrap_or("")
+    );
+    let status_bar = TextLine::new(&status_bar_text);
+
+    // layout, and respond to the input
+    let events = Layout::new(width as u32, height as u32)
+        .add_item(&status_bar, Align::Bottom, Restriction::Shrink)
+        .add_item(&lines, Align::Left, Restriction::Shrink)
+        .add_item(editor, Align::Left, Restriction::Grow)
+        .interact(&event);
+
+    // layout, and draw
+
+    todo!()
 }
 
 /// render the editor to a buffer
@@ -2343,21 +1935,16 @@ pub fn render_editor_to_buffer(
         .map(|(x, y)| (x + lines.width(height), y));
 
     // and simply perform layout
-    /*let x = Layout::new(width as u32, height as u32)
-        .add_item(
-            &TextLine::new(&status_line),
-            Align::Bottom,
-            Restriction::Shrink,
-        )
-        .add_item(&lines, Align::Left, Restriction::Shrink)
-        .add_item(editor, Align::Left, Restriction::Grow)
-        .draw();*/
-
     (
-        lines
-            .left_of(&editor, SplitMode::PreferLeft)
-            .top_of(&TextLine::new(&status_line), SplitMode::PreferRight)
-            .get_buffer(width, height),
+        Layout::new(width as u32, height as u32)
+            .add_item(
+                &TextLine::new(&status_line),
+                Align::Bottom,
+                Restriction::Shrink,
+            )
+            .add_item(&lines, Align::Left, Restriction::Shrink)
+            .add_item(editor, Align::Left, Restriction::Grow)
+            .draw(),
         cursor_pos,
     )
 }
@@ -2477,9 +2064,10 @@ fn terminal_main(
     save_path: PathBuf,
     relative_line_numbers: bool,
     tab_width: usize,
+    disable_mouse_interaction: bool,
 ) {
     // set up the terminal
-    setup_terminal();
+    setup_terminal(disable_mouse_interaction);
 
     // state
     let (mut width, mut height) = terminal::size().unwrap();
@@ -2720,6 +2308,10 @@ struct Args {
     /// file to edit
     file_path: PathBuf,
 
+    /// whether to allow mouse navigation
+    #[arg(long, short, default_value_t = false)]
+    disable_mouse_interaction: bool,
+
     /// tab width
     #[arg(long, short, default_value_t = 4)]
     tab_width: usize,
@@ -2751,5 +2343,6 @@ fn main() {
         args.file_path,
         args.relative_line_numbers,
         args.tab_width,
+        args.disable_mouse_interaction,
     );
 }

@@ -1,4 +1,4 @@
-# MiniNotes
+# Mininotes
 A tiny terminal and gui notetaking app
 
 Mainly serves as an example on how to make text editing work on both terminal and gui, in a decent way.
