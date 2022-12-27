@@ -1,10 +1,6 @@
 # Mininotes
 A small terminal text editor
 
-Mainly serves as an example on how to make text editing work on both terminal and gui, in a decent way.
-
-Feel free to use this as reference for whatever you want.
-
 ## Features
  - grapheme navigation
  - line numbers
@@ -54,19 +50,5 @@ Should work on most desktop platforms and terminals
 
 Tested on linux, windows and termux (android)
 
-## Jank
-The code is not without jank.
-I've put everything in a single file, which can make code navigation slightly harder.
-
-There's also quite a lot of different integer types being used.
-crossterm uses u16 for sizes, I use usize for the text editor part, usize for communicating between crossterm and the editor, and u32 for UI.
-
-While most of the methods should work in any context, I haven't implemented every feature, and some might miss some handy arguments if you want to use it,
-due to the code mostly being written for mininotes itself.
-
-bringing in the entirety of clap (and clap_derive) for only a few command line args may also have been over the top. 
-
-I might come back to fix some of these shortcomings, but I'm not sure, as I'd like to make a bigger, better text editor with what I learned here.
-
 ## Licence
-WTFPL
+MIT, see LICENCE for details
