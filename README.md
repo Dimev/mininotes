@@ -39,7 +39,7 @@ Options
  
  - Ctrl+z: undo change
  - Ctrl+y: redo change
- - Alt+q: discard changes since last save
+ - Alt+d: discard changes since last save
  
  - Ctrl+s: save changes to file
  
