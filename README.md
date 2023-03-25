@@ -1,6 +1,9 @@
 # Mininotes
 A small terminal text editor
 
+![app_screenshot](https://user-images.githubusercontent.com/63582793/227746844-0f003565-ce8c-4d17-83b9-cab55b7d64e6.png)
+
+
 ## Features
  - grapheme navigation
  - line numbers
