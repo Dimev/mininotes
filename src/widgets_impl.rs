@@ -99,7 +99,7 @@ impl Drawable<TerminalBuffer> for LineNumbers {
             }
 
             // get the start number
-            let mut base = (10 as usize).pow(padding.saturating_sub(1) as u32);
+            let mut base = 10_usize.pow(padding.saturating_sub(1) as u32);
 
             // get the line number
             let line_number = if self.relative && line != self.current {
@@ -207,10 +207,10 @@ impl Drawable<TerminalBuffer> for TextEditor<TermLineLayoutSettings> {
                     let grapheme = line.byte_slice(cursor..next_cursor);
 
                     // stop if it's a newline
-                    if grapheme.chars().any(|x| is_newline(x)) {
+                    if grapheme.chars().any(is_newline) {
                         // if there's still room on the line, mark this as selected, if that's the case
                         if column >= self.get_columns_scrolled()
-                            && column + 1 <= self.get_columns_scrolled() + width as usize
+                            && column < self.get_columns_scrolled() + width as usize
                             && selection_range.contains(&(cursor + line_start))
                         {
                             // add to the buffer
@@ -330,7 +330,7 @@ impl Interactive<UiEvent, Vec<UiReaction>> for TextEditor<TermLineLayoutSettings
         // and emit the  right events
         [UiReaction::FixScrol(width as usize, height as usize)]
             .into_iter()
-            .chain(extra.into_iter())
+            .chain(extra)
             .collect()
     }
 }
@@ -351,7 +351,7 @@ impl OutputResult for Vec<UiReaction> {
     }
 
     fn combine(self, other: Self) -> Self {
-        self.into_iter().chain(other.into_iter()).collect()
+        self.into_iter().chain(other).collect()
     }
 }
 

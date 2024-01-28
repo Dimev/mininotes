@@ -4,7 +4,7 @@ use crate::unicode::{TERM_TAB_WIDTH, move_grapheme, string_width};
 use crate::editor::{LineLayout, GraphemePosition};
 use ropey::RopeSlice;
 use crossterm::{
-    cursor::{self, CursorShape},
+    cursor::{self, SetCursorStyle},
     event::{
         DisableMouseCapture, EnableMouseCapture, 
     },
@@ -302,7 +302,7 @@ pub fn setup_terminal(disable_mouse_interaction: bool) {
         // so it won't clutter other activities
         EnterAlternateScreen,
         // change cursor to a bar, as that's more clear
-        cursor::SetCursorShape(CursorShape::Line),
+        SetCursorStyle::BlinkingBar,
     )
     .unwrap();
 
@@ -323,7 +323,7 @@ pub fn cleanup_terminal(message: &str) {
         // restore old cursor position
         cursor::RestorePosition,
         // restore cursor style
-        cursor::SetCursorShape(CursorShape::Block),
+        SetCursorStyle::BlinkingBlock,
         // restore visibility
         cursor::Show,
     )

@@ -1,6 +1,6 @@
 [package]
 name = "mininotes"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Dimas Leenman"]
 description = "A small terminal text editor"
@@ -12,12 +12,13 @@ readme = "README.md"
 categories = ["command-line-interface", "command-line-utilities"]
 
 [dependencies]
-clap = { version = "4.0.29", features = ["derive"] }
-crossterm = "0.25.0"
-ropey = "1.5.0"
-unicode-segmentation = "1.10.0"
-unicode-width = "0.1.10"
+cfg-if = "1.0.0"
+clap = { version = "4.4.18", features = ["derive"] }
+crossterm = "0.27.0"
+ropey = "1.6.1"
+unicode-segmentation = "1.10.1"
+unicode-width = "0.1.11"
 
 # bleh (These operating systems are supported by arboard)
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd", target_os = "dragonfly", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
-arboard = { version = "3.2.0" }
+arboard = { version = "3.3.0", features = ["wayland-data-control"] }

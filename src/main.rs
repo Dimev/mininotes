@@ -24,7 +24,7 @@ use crossterm::{
 };
 
 // path saving
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // arg parsing
 use clap::Parser;
@@ -34,7 +34,7 @@ pub fn update_and_render_to_buffer(
     editor: &mut TextEditor<TermLineLayoutSettings>,
     width: usize,
     height: usize,
-    filepath: &PathBuf,
+    filepath: &Path,
     relative_line_numbers: bool,
     event: UiEvent,
 ) -> TerminalBuffer {
@@ -54,7 +54,7 @@ pub fn update_and_render_to_buffer(
     let status_bar_text = format!(
         " {}{} {pos_x}:{pos_y}",
         filepath.to_string_lossy(),
-        editor.has_changed_since_save().then_some("*").unwrap_or("")
+        if editor.has_changed_since_save() {"*" } else { "" }
     );
     let status_bar = TextLine::new(&status_bar_text);
 
@@ -214,7 +214,7 @@ fn terminal_main(
                         }
                     } else if code == KeyCode::Char('v') && modifiers == KeyModifiers::CONTROL {
                         // paste, if the clipboard is not empty
-                        if clip.len() > 0 {
+                        if !clip.is_empty() {
                             editor.insert_string_at_cursor(&clip);
                         }
                     } else if code == KeyCode::Char('x') && modifiers == KeyModifiers::CONTROL {
@@ -233,7 +233,7 @@ fn terminal_main(
                         // paste, if the clipboard is not empty
                         if let Some(x) = system_clip.as_mut() {
                             if let Ok(y) = x.get_text() {
-                                if y.len() > 0 {
+                                if !y.is_empty() {
                                     editor.insert_string_at_cursor(&y);
                                 }
                             }

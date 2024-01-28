@@ -421,7 +421,7 @@ impl<L: LineLayout> TextEditor<L> {
         self.cut_selection();
 
         // get the string to insert
-        let mut buffer = [0 as u8; 4];
+        let mut buffer = [0_u8; 4];
         let string = character.encode_utf8(&mut buffer);
 
         // insert the string
@@ -522,7 +522,7 @@ impl<L: LineLayout> TextEditor<L> {
         self.text.insert(start_char, string);
 
         // insert the change, if it was anything
-        if record && string.len() > 0 {
+        if record && !string.is_empty() {
             self.do_change(EditorAction::Insert(start, string.to_string()));
         }
 
@@ -569,7 +569,7 @@ impl<L: LineLayout> TextEditor<L> {
         self.text.remove(start_char..end_char);
 
         // insert the change, if it was anything
-        if record && string.len() > 0 {
+        if record && !string.is_empty() {
             self.do_change(EditorAction::Delete(start, string));
         }
 
